@@ -33,6 +33,20 @@ use unicode_width::UnicodeWidthStr;
 /// la complétion doit arriver avant que la pensée ne refroidisse.
 const EDITOR_MODEL: &str = "deepseek-v4.1-flash";
 
+/// how long a transient line lives before the bar goes quiet again.
+const STATUS_TTL: Duration = Duration::from_secs(4);
+/// the last stretch of that life, during which the line dims out.
+const FADE_OUT: Duration = Duration::from_millis(900);
+/// a toast slides in over this long, then sits still.
+const SLIDE_IN: Duration = Duration::from_millis(160);
+/// how long a toast lives, and how long it spends fading out.
+const TOAST_TTL: Duration = Duration::from_millis(3500);
+/// the spinner: ten braille frames, one every 80 ms.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// the rounded ends of a pill segment (powerline half circles).
+const CAP_L: &str = "\u{E0B6}";
+const CAP_R: &str = "\u{E0B4}";
+
 /// Largeur du panneau explorateur (séparateur compris).
 const EXPL_W: u16 = 30;
 
@@ -338,6 +352,13 @@ pub struct Editor {
     complete_agent: AgentRole,
     /// last check after a save: one summary line + gutter marks
     check_note: Option<String>,
+    /// when that check landed: the indicator pulses for a moment
+    check_at: Option<Instant>,
+    /// the animation clock — frames come from here, never from wall time
+    epoch: Instant,
+    /// when the transient line was last written, and what it said
+    status_at: Instant,
+    status_seen: String,
     check_marks: Vec<(usize, Severity)>,
     check_rx: Option<Receiver<crate::check::Report>>,
     /// diagnostics gcc du dernier build (^B) + navigation ^N/^P
@@ -466,6 +487,8 @@ impl Editor {
             .to_string();
         let _ = file; // l'extension est déjà extraite
         let saved = lines.clone();
+        let status = "f2 panels · ^b check · f5 run · f6 format · ^s save · ^q quit".to_string();
+        let status_seen = status.clone();
         let mut ed = Self {
             lines,
             cx: 0,
@@ -475,7 +498,7 @@ impl Editor {
             file,
             modified: false,
             saved,
-            status: "f2 panels · ^b check · f5 run · f6 format · ^s save · ^q quit".to_string(),
+            status,
             ghost: None,
             ghost_lines: Vec::new(),
             ai_busy: false,
@@ -485,6 +508,10 @@ impl Editor {
             confirm_quit: false,
             complete_agent: load_complete_agent(),
             check_note: None,
+            check_at: None,
+            epoch: Instant::now(),
+            status_at: Instant::now(),
+            status_seen: status_seen.clone(),
             check_marks: Vec::new(),
             check_rx: None,
             diags: Vec::new(),
@@ -742,12 +769,9 @@ impl Editor {
             Ok(()) => {
                 self.saved = self.lines.clone();
                 self.sync_modified();
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("file")
-                    .to_string();
-                self.notify(Level::Ok, format!("{name} — saved ✓"));
+                // no file name in the message: it is already in the tree and
+                // in the breadcrumb — the bar only says what just happened
+                self.notify(Level::Ok, "saved ✓");
                 // the check runs off the ui thread after every save: the
                 // language's own tool plus the universal style pass
                 let p = path.clone();
@@ -972,18 +996,9 @@ impl Editor {
             return;
         };
         if let Ok(report) = rx.try_recv() {
-            let level = if report
-                .findings
-                .iter()
-                .any(|f| f.severity == Severity::Major)
-            {
-                Level::Err
-            } else if report.findings.is_empty() {
-                Level::Ok
-            } else {
-                Level::Warn
-            };
-            self.notify(level, report.note.clone());
+            // no toast and no transient line: the verdict is the indicator in
+            // the corner, and it pulses once so you notice it changed
+            self.check_at = Some(Instant::now());
             self.check_note = Some(report.note.clone());
             self.check_marks = report.marks.clone();
             self.check_details = report.details.clone();
@@ -1072,6 +1087,51 @@ impl Editor {
     }
 
     /// Notification toast (coin haut-droit) + le statut garde le dernier état.
+    /// the transient line ages: stamped whenever `status` actually changes,
+    /// so any action brings it back and it fades on its own afterwards.
+    fn tick_status(&mut self) {
+        if self.status != self.status_seen {
+            self.status_seen = self.status.clone();
+            self.status_at = Instant::now();
+        }
+    }
+
+    fn status_age(&self) -> Duration {
+        self.status_at.elapsed()
+    }
+
+    /// is a background job running? then the spinner turns and says what.
+    fn busy(&self) -> Option<&'static str> {
+        if self.ai_busy {
+            Some("thinking")
+        } else if self.diag_rx.is_some() {
+            Some("checking")
+        } else if self.check_rx.is_some() {
+            Some("reading")
+        } else if self.header_rx.is_some() {
+            Some("writing")
+        } else {
+            None
+        }
+    }
+
+    /// the next spinner frame, from the animation clock.
+    fn spinner(&self) -> &'static str {
+        let i = (self.epoch.elapsed().as_millis() / 80) as usize % SPINNER.len();
+        SPINNER[i]
+    }
+
+    /// redraw fast while something moves, slowly when the screen is still.
+    fn animating(&self) -> bool {
+        self.busy().is_some()
+            || !self.toasts.is_empty()
+            || self.status_age() < STATUS_TTL
+            || self
+                .check_at
+                .map(|t| t.elapsed() < Duration::from_millis(700))
+                .unwrap_or(false)
+    }
+
     fn notify(&mut self, level: Level, text: impl Into<String>) {
         let text = text.into();
         self.status = text.clone();
@@ -2035,6 +2095,29 @@ fn float_bg() -> Color {
     Color::Indexed(0)
 }
 
+/// a rounded segment: the label, with a powerline half-circle on each end, so
+/// the bar reads as pills rather than as a row of blocks.
+fn put_pill(
+    buf: &mut ratatui::buffer::Buffer,
+    x: u16,
+    y: u16,
+    label: &str,
+    fg: Color,
+    bg: Color,
+    bold: bool,
+) -> u16 {
+    buf[(x, y)]
+        .set_symbol(CAP_L)
+        .set_fg(bg)
+        .set_bg(Ed::bar_bg());
+    let after = put_seg(buf, x + 1, y, label, fg, bg, bold);
+    buf[(after, y)]
+        .set_symbol(CAP_R)
+        .set_fg(bg)
+        .set_bg(Ed::bar_bg());
+    after + 1
+}
+
 /// Écrit un segment de barre (fond + texte) et retourne la colonne suivante.
 fn put_seg(
     buf: &mut ratatui::buffer::Buffer,
@@ -2289,23 +2372,9 @@ fn draw_topbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
             false,
         );
     }
-    // right: the project you are in, then the last check
+    // right: the project you are in. the check verdict lives in the status
+    // bar only — one fact, one place.
     let mut right_x = area.right();
-    if let Some(note) = &ed.check_note {
-        let bad = ed.check_marks.iter().any(|(_, s)| *s == Severity::Major);
-        let color = if bad {
-            Ed::red()
-        } else if ed.check_marks.is_empty() {
-            Ed::green()
-        } else {
-            Ed::amber()
-        };
-        let seg = format!(" {note} ");
-        let w = UnicodeWidthStr::width(seg.as_str()) as u16;
-        right_x = right_x.saturating_sub(w);
-        put_seg(buf, right_x, area.y, &seg, color, seg_bg, false);
-        right_x = right_x.saturating_sub(1);
-    }
     if let Some(label) = &ed.project_label {
         let seg = format!(" {label} ");
         let w = UnicodeWidthStr::width(seg.as_str()) as u16;
@@ -2361,55 +2430,10 @@ fn draw_statusbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
     let buf = frame.buffer_mut();
     let mut x = area.x;
 
-    // the badge names what you are looking at: the language while editing,
-    // the panel otherwise
-    let lang = ed
-        .file
-        .as_deref()
-        .map(langs::for_path)
-        .unwrap_or(&langs::PLAIN);
-    let (label, color) = match ed.focus {
-        Focus::Editor => (format!(" {} ", lang.name), Color::Indexed(lang.color)),
-        Focus::Explorer => (" explorer ".to_string(), Ed::green()),
-        Focus::Search => (" search ".to_string(), Color::Indexed(5)),
-        Focus::Terminal => (" terminal ".to_string(), Ed::amber()),
-    };
-    x = put_seg(buf, x, area.y, &label, Color::Indexed(0), color, true) + 1;
-    // segment fichier
-    if let Some(p) = &ed.file {
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-        x = put_seg(
-            buf,
-            x,
-            area.y,
-            &format!(" {} ", file_icon(name, false)),
-            file_color(name, false),
-            seg_bg,
-            false,
-        );
-        x = put_seg(
-            buf,
-            x,
-            area.y,
-            &format!("{name} "),
-            Ed::text(),
-            seg_bg,
-            false,
-        );
-        if ed.modified {
-            x = put_seg(buf, x, area.y, "● ", Ed::accent(), seg_bg, false);
-        }
-        x += 1;
-    }
-
-    // segments de droite : diagnostics, norme, position, progression
+    // right: one check indicator, the position, the progress. the check is
+    // the only place the verdict lives — no copy in the top bar, none in the
+    // transient line, no toast.
     let mut right: Vec<(String, Color)> = Vec::new();
-    let errs = ed.diags.iter().filter(|d| d.is_error).count();
-    let warns = ed.diags.len() - errs;
-    if errs > 0 || warns > 0 {
-        right.push((format!("✗{errs}"), Ed::red()));
-        right.push((format!("⚠{warns}"), Ed::amber()));
-    }
     if let Some(note) = &ed.check_note {
         let bad = ed.check_marks.iter().any(|(_, s)| *s == Severity::Major);
         let color = if bad {
@@ -2429,11 +2453,56 @@ fn draw_statusbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
         .map(|(s, _)| UnicodeWidthStr::width(s.as_str()) as u16 + 2)
         .sum();
     let mut rx = area.right().saturating_sub(total);
+    // a fresh verdict pulses: bold for a moment, then calm
+    let pulse = ed
+        .check_at
+        .map(|t| t.elapsed() < Duration::from_millis(700))
+        .unwrap_or(false);
     for (text, color) in right {
-        rx = put_seg(buf, rx, area.y, &format!(" {text} "), color, seg_bg, false);
+        rx = put_seg(buf, rx, area.y, &format!(" {text} "), color, seg_bg, pulse);
     }
 
-    // centre : prompt en cours ou dernier statut
+    // left: what you are looking at, as a pill — the language while editing,
+    // the panel otherwise. the file name is not repeated here: it is in the
+    // tree and in the breadcrumb already.
+    let lang = ed
+        .file
+        .as_deref()
+        .map(langs::for_path)
+        .unwrap_or(&langs::PLAIN);
+    let (label, color) = match ed.focus {
+        Focus::Editor => (lang.name.to_string(), Color::Indexed(lang.color)),
+        Focus::Explorer => ("explorer".to_string(), Ed::green()),
+        Focus::Search => ("search".to_string(), Color::Indexed(5)),
+        Focus::Terminal => ("terminal".to_string(), Ed::amber()),
+    };
+    let padded = format!(" {label} ");
+    x = if icons_enabled() {
+        put_pill(buf, x, area.y, &padded, seg_bg, color, true)
+    } else {
+        put_seg(buf, x, area.y, &padded, seg_bg, color, true) + 1
+    };
+    // unsaved changes: a dot, not a second copy of the name
+    if ed.file.is_some() && ed.modified {
+        x = put_seg(buf, x, area.y, " ● ", Ed::accent(), seg_bg, false);
+    }
+    // something is running, and it turns
+    if let Some(what) = ed.busy() {
+        x = put_seg(
+            buf,
+            x,
+            area.y,
+            &format!(" {} {what} ", ed.spinner()),
+            Ed::cyan(),
+            seg_bg,
+            false,
+        );
+    }
+
+    // middle: what you are typing, or a message that is fading away. an empty
+    // bar is the resting state — nothing is repeated just to fill space.
+    let age = ed.status_age();
+    let fading = age > STATUS_TTL.saturating_sub(FADE_OUT);
     let mid = if let Some((k, t)) = &ed.prompt {
         let label = match k {
             'f' => "search : ",
@@ -2443,20 +2512,30 @@ fn draw_statusbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
             _ => "line : ",
         };
         format!("{label}{t}▌")
-    } else {
+    } else if age < STATUS_TTL {
         ed.status.clone()
+    } else {
+        String::new()
     };
-    let avail = (rx.saturating_sub(x + 1)) as usize;
-    let mid: String = mid.chars().take(avail.saturating_sub(1)).collect();
-    put_seg(
-        buf,
-        x,
-        area.y,
-        &format!(" {mid}"),
-        Ed::dim(),
-        Ed::bar_bg(),
-        false,
-    );
+    if !mid.is_empty() {
+        let avail = (rx.saturating_sub(x + 1)) as usize;
+        let mid: String = mid.chars().take(avail.saturating_sub(1)).collect();
+        let fg = if fading { Ed::gutter() } else { Ed::dim() };
+        let start = x;
+        let end = put_seg(buf, x, area.y, &format!(" {mid}"), fg, Ed::bar_bg(), false);
+        if fading {
+            // the terminal's own faint attribute: a real fade, no palette hack
+            buf.set_style(
+                ratatui::layout::Rect {
+                    x: start,
+                    y: area.y,
+                    width: end.saturating_sub(start),
+                    height: 1,
+                },
+                Style::default().add_modifier(Modifier::DIM),
+            );
+        }
+    }
 }
 
 /// Recherche de fichiers flottante — le float Telescope : prompt en haut,
@@ -2559,8 +2638,7 @@ fn draw_search(frame: &mut Frame, fs: &mut FileSearch, zone: ratatui::layout::Re
 /// Notifications toast — cartes flottantes empilées en haut à droite,
 /// colorées par niveau, évanouissement après 3,5 s.
 fn draw_toasts(frame: &mut Frame, ed: &mut Editor, area: ratatui::layout::Rect) {
-    ed.toasts
-        .retain(|t| t.at.elapsed() < Duration::from_millis(3500));
+    ed.toasts.retain(|t| t.at.elapsed() < TOAST_TTL);
     let shown: Vec<&Toast> = ed.toasts.iter().rev().take(3).collect();
     let mut y = area.y + 1;
     for toast in shown {
@@ -2598,9 +2676,17 @@ fn draw_toasts(frame: &mut Frame, ed: &mut Editor, area: ratatui::layout::Rect) 
             .unwrap_or(4);
         let w = ((text_w + 6).clamp(14, 48)) as u16;
         let h = lines_t.len() as u16 + 2;
-        let x = area.right().saturating_sub(w + 1);
-        if y + h + 1 >= area.bottom() {
-            break;
+        // the card slides in from the right, then fades out before it goes
+        let age = toast.at.elapsed();
+        let slide = if age < SLIDE_IN {
+            (SLIDE_IN - age).as_millis() as u16 / 6
+        } else {
+            0
+        };
+        let x = area.right().saturating_sub(w + 1).saturating_add(slide);
+        if y + h + 1 >= area.bottom() || x + w > area.right() {
+            y += h;
+            continue;
         }
         let rect = ratatui::layout::Rect {
             x,
@@ -2634,6 +2720,11 @@ fn draw_toasts(frame: &mut Frame, ed: &mut Editor, area: ratatui::layout::Rect) 
             })
             .collect();
         frame.render_widget(Paragraph::new(lines), inner);
+        if age > TOAST_TTL.saturating_sub(FADE_OUT) {
+            frame
+                .buffer_mut()
+                .set_style(rect, Style::default().add_modifier(Modifier::DIM));
+        }
         y += h + 1;
     }
 }
@@ -3166,6 +3257,7 @@ fn kitty_keyboard() -> bool {
 
 fn loop_run(terminal: &mut ratatui::DefaultTerminal, ed: &mut Editor) -> io::Result<()> {
     while !ed.should_quit {
+        ed.tick_status();
         ed.poll_ai();
         ed.poll_check();
         ed.poll_diag();
@@ -3184,9 +3276,15 @@ fn loop_run(terminal: &mut ratatui::DefaultTerminal, ed: &mut Editor) -> io::Res
         let inner_w = size.width.saturating_sub(expl_w + 2);
         ed.keep_cursor_visible(inner_h as usize, inner_w as usize);
         terminal.draw(|frame| draw(frame, ed))?;
-        // poll avec timeout : la boucle doit se réveiller pour lire les
-        // réponses IA/norme/build qui arrivent en tâche de fond
-        if event::poll(std::time::Duration::from_millis(120))? {
+        // the frame rate follows the screen: ~60 fps while something moves,
+        // a lazy 8 fps when everything is still. the loop must also wake up
+        // to collect the ai/check/build answers arriving on worker threads.
+        let timeout = if ed.animating() {
+            std::time::Duration::from_millis(16)
+        } else {
+            std::time::Duration::from_millis(120)
+        };
+        if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == crossterm::event::KeyEventKind::Press {
                     ed.on_key(key);

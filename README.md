@@ -2,6 +2,8 @@
 
 an adaptive terminal editor. one buffer, every language.
 
+version 1.0.
+
 ![nana, the welcome screen](docs/shots/image.png)
 
 ## what it is
@@ -185,7 +187,7 @@ final_newline = true
 ## development
 
 ```sh
-cargo test        # 111 tests, no network, no fixtures to download
+cargo test        # 113 tests, no network, no fixtures to download
 cargo run         # the editor, on this repository
 cargo run -- --languages
 ```
