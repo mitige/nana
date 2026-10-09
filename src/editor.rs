@@ -771,7 +771,7 @@ impl Editor {
                 self.sync_modified();
                 // no file name in the message: it is already in the tree and
                 // in the breadcrumb — the bar only says what just happened
-                self.notify(Level::Ok, "saved ✓");
+                self.notify(Level::Ok, "saved");
                 // the check runs off the ui thread after every save: the
                 // language's own tool plus the universal style pass
                 let p = path.clone();
@@ -893,7 +893,7 @@ impl Editor {
                     self.diags = diags;
                     if self.diags.is_empty() {
                         self.diag_idx = None;
-                        self.notify(Level::Ok, "check ✓ — clean");
+                        self.notify(Level::Ok, "clean");
                     } else {
                         let errs = self.diags.iter().filter(|d| d.is_error).count();
                         let warns = self.diags.len() - errs;
@@ -1133,7 +1133,14 @@ impl Editor {
     }
 
     fn notify(&mut self, level: Level, text: impl Into<String>) {
-        let text = text.into();
+        // the card paints its own icon on the first line: a message that also
+        // carries one would show the same emoji twice
+        let text: String = text
+            .into()
+            .replace(['✓', '✗', '⚠', 'ℹ'], "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         self.status = text.clone();
         // même message déjà affiché ? on le rafraîchit au lieu de l'empiler —
         // sinon la même notif (et son icône) apparaît deux fois.
@@ -1411,7 +1418,7 @@ impl Editor {
         self.sync_modified();
         self.cy = 0;
         self.cx = 0;
-        self.notify(Level::Ok, "header generated ✓");
+        self.notify(Level::Ok, "header inserted");
     }
 
     /// re-read the project the current file belongs to (cheap: a few file
@@ -1855,7 +1862,7 @@ impl Editor {
                     .unwrap_or(0);
                 self.complete_agent = COMPLETE_AGENTS[(pos + 1) % COMPLETE_AGENTS.len()];
                 save_complete_agent(self.complete_agent);
-                self.status = "profile changed ✓".into();
+                self.status = "profile changed".into();
             }
             (KeyCode::Char('k'), true, _) => {
                 self.snapshot();
@@ -2386,15 +2393,12 @@ fn draw_topbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
     };
     // branche git
     if let Some(br) = &ed.git_branch {
-        put_seg(
-            buf,
-            x,
-            area.y,
-            &format!(" ⎇ {br} "),
-            Ed::text(),
-            seg_bg,
-            false,
-        );
+        let label = format!(" ⎇ {br} ");
+        if icons_enabled() {
+            put_pill(buf, x, area.y, &label, Ed::text(), seg_bg, false);
+        } else {
+            put_seg(buf, x, area.y, &label, Ed::text(), seg_bg, false);
+        }
     }
     // right: the project you are in. the check verdict lives in the status
     // bar only — one fact, one place.
@@ -2421,28 +2425,37 @@ fn draw_topbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
         };
         let dirty_w = if ed.modified { 2 } else { 0 };
         let icon = file_icon(name, false);
-        let total = UnicodeWidthStr::width(crumb.as_str()) as u16 + dirty_w + 2;
-        let cx = area.x + area.width.saturating_sub(total) / 2;
-        let ix = put_seg(
+        let caps = if icons_enabled() { 2 } else { 0 };
+        let total = UnicodeWidthStr::width(crumb.as_str()) as u16 + dirty_w + 2 + caps;
+        let mut x = area.x + area.width.saturating_sub(total) / 2;
+        // the breadcrumb is a rounded chip: no square corner in the middle of
+        // the bar either
+        let chip = Ed::bar_bg();
+        if icons_enabled() {
+            buf[(x, area.y)]
+                .set_symbol(CAP_L)
+                .set_fg(seg_bg)
+                .set_bg(chip);
+            x += 1;
+        }
+        x = put_seg(buf, x, area.y, icon, file_color(name, false), chip, false);
+        x = put_seg(
             buf,
-            cx,
-            area.y,
-            icon,
-            file_color(name, false),
-            Ed::bar_bg(),
-            false,
-        );
-        let nx = put_seg(
-            buf,
-            ix,
+            x,
             area.y,
             &format!(" {crumb}"),
             Ed::text(),
-            Ed::bar_bg(),
+            chip,
             false,
         );
         if ed.modified {
-            put_seg(buf, nx, area.y, " ●", Ed::accent(), Ed::bar_bg(), false);
+            x = put_seg(buf, x, area.y, " ●", Ed::accent(), chip, false);
+        }
+        if icons_enabled() {
+            buf[(x, area.y)]
+                .set_symbol(CAP_R)
+                .set_fg(seg_bg)
+                .set_bg(chip);
         }
     }
 }
@@ -2663,15 +2676,20 @@ fn draw_search(frame: &mut Frame, fs: &mut FileSearch, zone: ratatui::layout::Re
         height: inner.height.saturating_sub(2),
         ..inner
     };
+    let widths: Vec<u16> = lines
+        .iter()
+        .map(|l| UnicodeWidthStr::width(l.to_string().as_str()) as u16)
+        .collect();
     frame.render_widget(Paragraph::new(lines), list_area);
-    // the highlighted result is a pill too
     if sel >= start && sel < start + paths.len() {
-        let y = list_area.y + (sel - start) as u16;
+        let i = sel - start;
+        let y = list_area.y + i as u16;
+        let w = widths.get(i).copied().unwrap_or(1).max(2);
         round_band(
             frame.buffer_mut(),
             y,
             list_area.x,
-            list_area.x + list_area.width.saturating_sub(1),
+            (list_area.x + w - 1).min(list_area.right().saturating_sub(1)),
             Ed::sel_row(),
         );
     }
@@ -3062,15 +3080,22 @@ fn draw_explorer(frame: &mut Frame, ex: &mut Explorer, area: ratatui::layout::Re
             line
         })
         .collect();
+    // the band of a row stops where its text stops: measure before drawing,
+    // otherwise the closing cap floats at the panel edge and the pill breaks
+    let widths: Vec<u16> = lines
+        .iter()
+        .map(|l| UnicodeWidthStr::width(l.to_string().as_str()) as u16)
+        .collect();
     frame.render_widget(Paragraph::new(lines), rows_area);
-    // the selected row is a pill, not a strip
     if sel >= start && sel < start + visible.len() {
-        let y = rows_area.y + (sel - start) as u16;
+        let i = sel - start;
+        let y = rows_area.y + i as u16;
+        let w = widths.get(i).copied().unwrap_or(1).max(2);
         round_band(
             frame.buffer_mut(),
             y,
             rows_area.x,
-            rows_area.x + rows_area.width.saturating_sub(1),
+            (rows_area.x + w - 1).min(rows_area.right().saturating_sub(1)),
             Ed::sel_row(),
         );
     }
@@ -3221,16 +3246,20 @@ fn draw_body(frame: &mut Frame, ed: &Editor, zone: ratatui::layout::Rect) {
         })
         .collect();
     frame.render_widget(Paragraph::new(text_lines), body[1]);
-    // the current line reads as a band with rounded ends, gutter included
+    // the current line is a band with rounded ends, gutter included — and its
+    // right end sits at the end of the line, not at the edge of the panel
     let cur_row = body[1].y + (ed.cy - ed.scroll_y) as u16;
     if cur_row >= body[1].y && cur_row < body[1].bottom() {
-        round_band(
-            frame.buffer_mut(),
-            cur_row,
-            body[0].x,
-            body[1].right().saturating_sub(1),
-            Ed::cur_line(),
-        );
+        let text_w = ed
+            .lines
+            .get(ed.cy)
+            .map(|l| UnicodeWidthStr::width(l.as_str()) as u16)
+            .unwrap_or(0)
+            .saturating_sub(ed.scroll_x as u16);
+        let end = (body[1].x + text_w)
+            .max(body[1].x + 1)
+            .min(body[1].right().saturating_sub(1));
+        round_band(frame.buffer_mut(), cur_row, body[0].x, end, Ed::cur_line());
     }
 
     // repère subtil à la colonne 80 (la limite de la norme) — un filet discret
@@ -4038,12 +4067,22 @@ mod diag_tests {
     #[test]
     fn toasts_pousses_puis_expires() {
         let mut ed = Editor::open(None).unwrap();
-        ed.notify(Level::Ok, "saved ✓");
+        ed.notify(Level::Ok, "saved");
         assert_eq!(ed.toasts.len(), 1);
-        assert_eq!(ed.status, "saved ✓", "le statut reflète le toast");
+        assert_eq!(ed.status, "saved", "le statut reflète le toast");
+        // the icon is painted by the card, so it must appear exactly once
+        ed.notify(Level::Ok, "saved ✓");
+        assert_eq!(
+            ed.status, "saved",
+            "a message carrying its own icon is cleaned"
+        );
+        // the card slides in from the right over ~160 ms: let it land
+        for toast in ed.toasts.iter_mut() {
+            toast.at = Instant::now() - Duration::from_millis(400);
+        }
         let text = render_text(&mut ed, 100, 30);
-        assert!(text.contains("saved ✓"), "la carte est dessinée");
-        assert!(text.contains("✓"), "icône du niveau");
+        assert!(text.contains("saved"), "la carte est dessinée");
+        assert_eq!(text.matches('✓').count(), 1, "un seul ✓ à l'écran");
         // un toast vieux de 10 s est purgé au prochain rendu
         ed.toasts.push(Toast {
             level: Level::Err,

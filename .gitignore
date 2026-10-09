@@ -1,2 +1,6 @@
 /target
 *.cap
+
+# the agent keeps its per-project state here: memory, sessions, personas,
+# skills — your notes about your project, not the project itself
+.nana/
