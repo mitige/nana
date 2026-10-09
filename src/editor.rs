@@ -941,19 +941,21 @@ impl Editor {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "code.c".into());
+        let lang_name = langs::for_path(Path::new(&fname)).name;
         let system = system_prompt(self.complete_agent, crate::ai::HelpLevel::Assistance)
-            + "\n\nTu es en mode COMPLÉTION (comme GitHub Copilot). On te donne le fichier \
-               COMPLET avec un curseur « ▌ ». Réponds UNIQUEMENT avec le code qui vient à \
-               partir de ▌ : la suite logique. Tu PEUX écrire plusieurs lignes — un bloc \
-               entier, un corps de fonction, une boucle complète — jusqu'à ~30 lignes si \
-               le bloc le demande, mais arrête-toi à la fin du bloc logique en cours : \
-               pas de conjecture au-delà. INTERDIT : includes déjà présents, un main() si \
-               le fichier en a déjà un, répéter le code d'avant ▌, markdown, fence, \
-               explication. Juste le code qui continue. Norme Epitech : indentation \
-               4 espaces, while (pas de for), pas de commentaire dans les fonctions. \
-               Si la ligne se termine par « { », commence ta réponse par un retour à la \
-               ligne.";
-        let user = format!("// fichier : {fname}\n{}", ctx_lines.join("\n"));
+            + &format!(
+                "\n\nyou are in COMPLETION mode (like github copilot). you are given the \
+                 whole {lang_name} file with a cursor marked « ▌ ». answer with the code \
+                 that comes at ▌ and nothing else: the logical continuation. you may write \
+                 several lines — a whole block, a function body, a loop — up to about 30 \
+                 lines if the block calls for it, but stop at the end of the current \
+                 logical block: no guessing past it. never: re-emit includes that are \
+                 already there, add a main() when the file has one, repeat code from \
+                 before ▌, markdown, fences, explanations. just the code that continues. \
+                 match the file's existing indentation and style. if the line ends with an \
+                 opening brace, start your answer with a newline."
+            );
+        let user = format!("// file: {fname}\n{}", ctx_lines.join("\n"));
         let (tx, rx) = channel();
         let client = client.clone();
         std::thread::spawn(move || {
@@ -1271,15 +1273,21 @@ impl Editor {
                 "
 ",
             );
+        let lang = self
+            .file
+            .as_deref()
+            .map(langs::for_path)
+            .unwrap_or(&langs::PLAIN)
+            .name;
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let system = "Tu écris la ligne « File description » d'un en-tête de fichier                           de code. Une seule ligne, en français, à l'infinitif, 60                           caractères max, sans point final. Réponds UNIQUEMENT avec                           cette ligne.";
-            let user = format!(
-                "fichier : {name}
-
-{body}"
+            let system = format!(
+                "you write the `description:` line of a {lang} file header. one line, \
+                 imperative, 60 characters at most, no final period, plain english. \
+                 answer with that line only."
             );
-            let _ = tx.send(client.chat_fast(system, &user).map_err(|e| e.to_string()));
+            let user = format!("file: {name}\n\n{body}");
+            let _ = tx.send(client.chat_fast(&system, &user).map_err(|e| e.to_string()));
         });
         self.header_rx = Some(rx);
         self.status = "header in progress…".into();
