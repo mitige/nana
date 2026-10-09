@@ -2127,14 +2127,7 @@ fn draw_welcome_float(frame: &mut Frame, area: ratatui::layout::Rect) {
     let inner = draw_box(
         frame,
         modal,
-        &[
-            (
-                format!("{} ", file_icon("main.rs", false)),
-                file_color("main.rs", false),
-            ),
-            (" n".into(), Ed::accent()),
-            ("ana ".into(), Ed::text()),
-        ],
+        &[(" n".into(), Ed::accent()), ("ana ".into(), Ed::text())],
         border_for(true),
     );
     let bullet = || Span::styled("● ", Style::default().fg(Ed::cyan()));
@@ -2271,12 +2264,11 @@ fn draw_topbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
         buf,
         x,
         area.y,
-        &format!(" {} ", file_icon("main.rs", false)),
-        Ed::text(),
+        " nana ",
+        Color::Indexed(0),
         Ed::accent(),
         true,
-    );
-    x = put_seg(buf, x, area.y, " nana ", Ed::accent(), Ed::bar_bg(), true) + 1;
+    ) + 1;
     // branche git
     if let Some(br) = &ed.git_branch {
         put_seg(
