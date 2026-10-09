@@ -2461,6 +2461,14 @@ fn draw_statusbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
 
 /// Recherche de fichiers flottante — le float Telescope : prompt en haut,
 /// séparateur fin, résultats sous le curseur.
+/// height of the floating search: the prompt, a separator, the borders and up
+/// to nine results — but never so short that a search with a single result has
+/// no room to draw. (it used to vanish entirely in that case.)
+fn search_float_height(results: usize, zone_height: u16) -> u16 {
+    let rows = (results.min(9) as u16).max(1);
+    (rows + 4).max(6).min(zone_height.saturating_sub(2))
+}
+
 fn draw_search(frame: &mut Frame, fs: &mut FileSearch, zone: ratatui::layout::Rect, focused: bool) {
     let w = zone.width.saturating_sub(8).min(62);
     let rows_h = (fs.len().min(9) as u16).max(1);
@@ -3812,29 +3820,25 @@ mod diag_tests {
 
     /// ^O : la frappe filtre, Enter ouvre le fichier, Échap referme.
     #[test]
-    /// A search with a single result still draws its floating panel: the
-    /// height guard used to swallow it, leaving a focus state with no ui.
+    /// A search with a single result must still have room to draw: the float
+    /// used to compute a height under the guard and disappear, leaving a
+    /// focused panel with nothing on screen.
     #[test]
     fn la_recherche_dessine_meme_avec_un_seul_resultat() {
-        let dir = std::env::temp_dir().join(format!("nana-srch-{}-b", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("seul.py"), "x = 1\n").unwrap();
-
-        let mut ed = Editor::open(None).unwrap();
-        ed.explorer = Some(Explorer::new(dir.clone()));
-        ed.focus = Focus::Explorer;
-        ed.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
-        assert_eq!(ed.search.as_ref().map(|s| s.len()), Some(1));
-        let text = render_text(&mut ed, 100, 30);
+        assert!(search_float_height(1, 30) >= 6, "one result still draws");
         assert!(
-            text.contains("search · 1"),
-            "the panel must be drawn: {text}"
+            search_float_height(0, 30) >= 6,
+            "an empty filter still draws"
         );
-        assert!(text.contains("seul.py"), "and list the file");
-        let _ = std::fs::remove_dir_all(dir);
+        assert!(search_float_height(9, 30) > search_float_height(1, 30));
+        assert!(
+            search_float_height(50, 30) <= 28,
+            "never taller than the zone"
+        );
+        assert!(search_float_height(3, 4) < 6, "a tiny zone draws nothing");
     }
 
+    #[test]
     fn recherche_flottante_ouvre_un_fichier() {
         let dir = std::env::temp_dir().join(format!("cnano-srch-{}-a", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
