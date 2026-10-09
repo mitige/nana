@@ -24,12 +24,12 @@ build systems and frameworks. the whole table lives in one file
 
 ## screenshots
 
-### c, in a cargo project
+### c, in a project
 
 the badge names the language, the right of the top bar names the project
-(`gcc`), and the gutter is calm.
+, and the gutter is calm.
 
-![a c file in a gcc project](docs/shots/image3.png)
+![a c file in a project](docs/shots/image3.png)
 
 ### `f5` runs it
 
