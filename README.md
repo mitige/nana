@@ -2,7 +2,7 @@
 
 an adaptive terminal editor. one buffer, every language.
 
-![nana, the welcome screen](docs/shots/welcome.png)
+![nana, the welcome screen](docs/shots/image.png)
 
 ## what it is
 
@@ -24,25 +24,12 @@ build systems and frameworks. the whole table lives in one file
 
 ## screenshots
 
-### rust, in a cargo project
+### c, in a cargo project
 
 the badge names the language, the right of the top bar names the project
-(`cargo`), and the gutter is calm.
+(`gcc`), and the gutter is calm.
 
-![a rust file in a cargo project](docs/shots/rust.png)
-
-### python, with the explorer
-
-the tree, the fuzzy filter, and the language badge.
-
-![a python file with the explorer open](docs/shots/python.png)
-
-### a broken file: the line is marked
-
-`ctrl+b` runs the language's checker — here python's own parser — and the
-diagnostic lands on the line, in the gutter and in the popup.
-
-![a syntax error marked in the gutter](docs/shots/check.png)
+![a c file in a gcc project](docs/shots/image3.png)
 
 ### `f5` runs it
 
@@ -50,19 +37,7 @@ the built-in terminal runs the project's command when there is one, the file's
 own recipe otherwise. it is a real pty, and it answers terminal queries, so
 modern shells start cleanly inside it.
 
-![running a python file in the built-in terminal](docs/shots/run.png)
-
-### panels
-
-`f2` cycles editor → explorer → search → terminal. one surface, no menus.
-
-![the explorer panel focused](docs/shots/panels.png)
-
-### fuzzy file search
-
-`ctrl+o` filters the project as you type.
-
-![the fuzzy file search](docs/shots/search.png)
+![running a python file in the built-in terminal](docs/shots/image2.png)
 
 ## install
 
