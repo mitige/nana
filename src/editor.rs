@@ -2471,10 +2471,7 @@ fn search_float_height(results: usize, zone_height: u16) -> u16 {
 
 fn draw_search(frame: &mut Frame, fs: &mut FileSearch, zone: ratatui::layout::Rect, focused: bool) {
     let w = zone.width.saturating_sub(8).min(62);
-    let rows_h = (fs.len().min(9) as u16).max(1);
-    // prompt + separator + borders, and never so short that the guard below
-    // refuses to draw a search with a single result
-    let h = (rows_h + 4).max(6).min(zone.height.saturating_sub(2));
+    let h = search_float_height(fs.len(), zone.height);
     if w < 24 || h < 6 {
         return;
     }
