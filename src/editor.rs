@@ -2464,7 +2464,9 @@ fn draw_statusbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
 fn draw_search(frame: &mut Frame, fs: &mut FileSearch, zone: ratatui::layout::Rect, focused: bool) {
     let w = zone.width.saturating_sub(8).min(62);
     let rows_h = (fs.len().min(9) as u16).max(1);
-    let h = (rows_h + 4).min(zone.height.saturating_sub(2)); // input + séparateur + bords
+    // prompt + separator + borders, and never so short that the guard below
+    // refuses to draw a search with a single result
+    let h = (rows_h + 4).max(6).min(zone.height.saturating_sub(2));
     if w < 24 || h < 6 {
         return;
     }
@@ -3810,6 +3812,29 @@ mod diag_tests {
 
     /// ^O : la frappe filtre, Enter ouvre le fichier, Échap referme.
     #[test]
+    /// A search with a single result still draws its floating panel: the
+    /// height guard used to swallow it, leaving a focus state with no ui.
+    #[test]
+    fn la_recherche_dessine_meme_avec_un_seul_resultat() {
+        let dir = std::env::temp_dir().join(format!("nana-srch-{}-b", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("seul.py"), "x = 1\n").unwrap();
+
+        let mut ed = Editor::open(None).unwrap();
+        ed.explorer = Some(Explorer::new(dir.clone()));
+        ed.focus = Focus::Explorer;
+        ed.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert_eq!(ed.search.as_ref().map(|s| s.len()), Some(1));
+        let text = render_text(&mut ed, 100, 30);
+        assert!(
+            text.contains("search · 1"),
+            "the panel must be drawn: {text}"
+        );
+        assert!(text.contains("seul.py"), "and list the file");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn recherche_flottante_ouvre_un_fichier() {
         let dir = std::env::temp_dir().join(format!("cnano-srch-{}-a", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

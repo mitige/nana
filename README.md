@@ -58,6 +58,12 @@ modern shells start cleanly inside it.
 
 ![the explorer panel focused](docs/shots/panels.png)
 
+### fuzzy file search
+
+`ctrl+o` filters the project as you type.
+
+![the fuzzy file search](docs/shots/search.png)
+
 ## install
 
 from source (rust 1.75+):
