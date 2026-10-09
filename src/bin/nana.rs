@@ -1,55 +1,470 @@
-//! the `nana` binary: usage, version, then the editor.
+//! the `nana` binary: the editor, and the agentic surfaces around it.
+//!
+//! everything the tui can do is also reachable from the shell, which is how a
+//! user (and a test) can exercise it end to end:
+//!
+//!   nana                          the editor
+//!   nana --agent "…"              one agent request, steps printed as they run
+//!   nana --agent --resume "…"     continue the project's last conversation
+//!   nana --show-prompt "…"        print exactly what the model will receive
+//!   nana --providers              who can answer, and how they are picked
+//!   nana --memory …               list, search, read, write, forget
+//!   nana --persona …              list, show, write, delete
+//!   nana --skills                 what this project can hand the agent
+//!   nana --languages              the language registry
 
-use std::path::PathBuf;
+use nana::{agent, memory, persona, provider, settings, skills};
+use std::path::{Path, PathBuf};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() {
-    let arg = std::env::args().nth(1);
-    if arg.as_deref() == Some("--languages") {
-        print_languages();
-        return;
-    }
-    if matches!(
-        arg.as_deref(),
-        Some("-h") | Some("--help") | Some("-V") | Some("--version")
-    ) {
-        if matches!(arg.as_deref(), Some("-V") | Some("--version")) {
-            println!("nana {VERSION}");
-            return;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let code = match args.first().map(String::as_str) {
+        Some("-h") | Some("--help") => {
+            help();
+            0
         }
-        print!(
-            "nana {VERSION} — an adaptive terminal editor\n\n\
-             usage: nana [file|dir]\n\n\
-             the editor adapts to the file you open: syntax colours, the\n\
-             checker, the run recipe and the auto header all come from a\n\
-             language registry (see src/langs.rs). in a project, nana runs\n\
-             the project's own commands (cargo, npm, django, make, cmake…).\n\n\
-             editing\n\
-             \x20 ctrl+s        save            ctrl+q  quit\n\
-             \x20 ctrl+z        undo            ctrl+k  cut line\n\
-             \x20 ctrl+u        paste           ctrl+f  search\n\
-             \x20 ctrl+r        replace         ctrl+g  go to line\n\
-             \x20 tab           accept suggestion, else indent\n\n\
-             panels\n\
-             \x20 ctrl+t        file explorer   ctrl+o  fuzzy file search\n\
-             \x20 f2            cycle panels    f3      terminal\n\
-             \x20 ctrl+n/p      next/previous diagnostic\n\n\
-             the language\n\
-             \x20 ctrl+b        check (compiler / linter / syntax)\n\
-             \x20 f5            run (project command, or the file itself)\n\
-             \x20 f6            format (prettier, rustfmt, gofmt, black…)\n\
-             \x20 f4            auto header in the language's comment syntax\n\
-             \x20 ctrl+e        ghost completion (needs an api key)\n\n\
-             config: ~/.config/nana/config.toml\n\n\
-             nana --languages lists every language it knows\n"
+        Some("-V") | Some("--version") => {
+            println!("nana {VERSION}");
+            0
+        }
+        Some("--languages") => {
+            print_languages();
+            0
+        }
+        Some("--providers") => {
+            providers();
+            0
+        }
+        Some("--skills") => {
+            print_skills(&root);
+            0
+        }
+        Some("--memory") => memory_cmd(&root, &args[1..]),
+        Some("--persona") => persona_cmd(&root, &args[1..]),
+        Some("--show-prompt") => show_prompt(&root, &args[1..]),
+        Some("--agent") => run_agent(&root, &args[1..]),
+        Some(flag) if flag.starts_with("--") => {
+            eprintln!("nana: unknown flag {flag} — try nana --help");
+            2
+        }
+        _ => {
+            let target = args.first().map(PathBuf::from);
+            match nana::editor::run(target) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("nana: {e}");
+                    1
+                }
+            }
+        }
+    };
+    std::process::exit(code);
+}
+
+fn help() {
+    print!(
+        "nana {VERSION} — an adaptive terminal editor, now with an agent
+
+usage: nana [file|dir]          open the editor
+       nana --agent \"…\"        ask the agent to do something here
+       nana --providers         list the model providers
+       nana --memory …          the project's memory
+       nana --persona …         saved system prompts
+       nana --skills            skills this project offers
+       nana --show-prompt \"…\"   print the assembled system prompt
+       nana --languages         every language nana knows
+
+the editor adapts to the file you open: syntax colours, the checker, the run
+recipe and the auto header all come from a language registry (src/langs.rs).
+in a project, nana runs the project's own commands (cargo, npm, django…).
+
+editing
+  ctrl+s        save            ctrl+q  quit
+  ctrl+z        undo            ctrl+k  cut line
+  ctrl+u        paste           ctrl+f  search
+  ctrl+r        replace         ctrl+g  go to line
+  tab           accept suggestion, else indent
+
+panels
+  ctrl+t        file explorer   ctrl+o  fuzzy file search
+  f2            cycle panels    f3      terminal
+  ctrl+n/p      next/previous diagnostic
+
+the language
+  ctrl+b        check (compiler / linter / syntax)
+  f5            run (project command, or the file itself)
+  f6            format (prettier, rustfmt, gofmt, black…)
+  f4            auto header in the language's comment syntax
+  ctrl+e        ghost completion
+
+the agent
+  settings: .nana/settings.json (project) over ~/.config/nana/settings.json
+  memory:   .nana/memory/  personas: .nana/personas/  skills: .nana/skills/
+"
+    );
+}
+
+fn providers() {
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let s = settings::Settings::load(&root);
+    let model = s
+        .model
+        .clone()
+        .unwrap_or_else(|| "(none set — the default is kimi-k3, which wants dashscope)".into());
+    let picked = provider::detect(&model);
+    println!("model:  {model}");
+    println!("picked: {} [{}]", picked.label, picked.kind_name());
+    println!();
+    println!("{:<20} {:<11} {:<48} key", "provider", "kind", "endpoint");
+    for p in provider::PROVIDERS {
+        let key = if p.keyless {
+            "not needed".to_string()
+        } else {
+            match p.key_env {
+                Some(env) => {
+                    let set = std::env::var(env).is_ok()
+                        || provider::dsh_has(env)
+                        || (p.id == "dashscope" && provider::dsh_has("OPP_API_KEY"));
+                    format!("{env}{}", if set { " (set)" } else { " (missing)" })
+                }
+                None => "-".to_string(),
+            }
+        };
+        println!(
+            "{:<20} {:<11} {:<48} {}",
+            p.id,
+            p.kind_name(),
+            p.base_url,
+            key
+        );
+    }
+    println!(
+        "\nmodels are routed by name: claude→anthropic, gemini→gemini, qwen/kimi/deepseek→dashscope,\n\
+         gpt→openai, llama→ollama, anything else→openai-compatible. override in settings.json:\n\
+         {{\"provider\":\"openai\",\"model\":\"gpt-4o\",\"base_url\":\"https://api.openai.com/v1\"}}"
+    );
+}
+
+fn print_skills(root: &Path) {
+    let s = settings::Settings::load(root);
+    let found = skills::discover(root, &s.skill_dirs);
+    if found.is_empty() {
+        println!(
+            "no skills in this project — add markdown files to .nana/skills/ (or skills/<name>/SKILL.md)"
         );
         return;
     }
-    let target = arg.map(PathBuf::from);
-    if let Err(e) = nana::editor::run(target) {
-        eprintln!("nana: {e}");
-        std::process::exit(1);
+    for s in found {
+        println!(
+            "{:<16} {:<40} trigger: {}",
+            s.name,
+            s.description,
+            if s.trigger.is_empty() {
+                "-"
+            } else {
+                &s.trigger
+            }
+        );
+    }
+}
+
+fn memory_cmd(root: &Path, rest: &[String]) -> i32 {
+    let mem = memory::Memory::open(root);
+    match rest.first().map(String::as_str) {
+        None | Some("list") => {
+            let entries = mem.list();
+            if entries.is_empty() {
+                println!("this project has no memory yet ({})", mem.root().display());
+                return 0;
+            }
+            for e in entries {
+                println!("{:<10} {:<24} {}", e.class.id(), e.name, e.title);
+            }
+            0
+        }
+        Some("search") => {
+            let Some(q) = rest.get(1) else {
+                eprintln!("usage: nana --memory search <text>");
+                return 2;
+            };
+            let hits = mem.search(q);
+            for h in &hits {
+                println!("{}:{}: {}", h.class.id(), h.line, h.text);
+            }
+            if hits.is_empty() {
+                println!("no match in this project's memory");
+            }
+            0
+        }
+        Some("show") | Some("read") => {
+            let (Some(class), Some(name)) = (rest.get(1), rest.get(2)) else {
+                eprintln!("usage: nana --memory show <class> <name>");
+                return 2;
+            };
+            let Some(class) = memory::Class::parse(class) else {
+                eprintln!("classes are user, feedback, project, reference");
+                return 2;
+            };
+            match mem.read(class, name) {
+                Ok(text) => {
+                    print!("{text}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("nana: {e}");
+                    1
+                }
+            }
+        }
+        Some("write") => {
+            // the text comes on stdin, so a page can be long and multi-line
+            let (Some(class), Some(name)) = (rest.get(1), rest.get(2)) else {
+                eprintln!("usage: nana --memory write <class> <name> <<'EOF' … EOF");
+                return 2;
+            };
+            let Some(class) = memory::Class::parse(class) else {
+                eprintln!("classes are user, feedback, project, reference");
+                return 2;
+            };
+            let mut body = String::new();
+            use std::io::Read;
+            if std::io::stdin().read_to_string(&mut body).is_err() || body.trim().is_empty() {
+                eprintln!("nana: nothing on stdin — pipe the page in");
+                return 2;
+            }
+            match mem.write(class, name, &body) {
+                Ok(path) => {
+                    println!("wrote {}", path.display());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("nana: {e}");
+                    1
+                }
+            }
+        }
+        Some("forget") => {
+            let (Some(class), Some(name)) = (rest.get(1), rest.get(2)) else {
+                eprintln!("usage: nana --memory forget <class> <name>");
+                return 2;
+            };
+            let Some(class) = memory::Class::parse(class) else {
+                eprintln!("classes are user, feedback, project, reference");
+                return 2;
+            };
+            match mem.forget(class, name) {
+                Ok(()) => {
+                    println!("forgotten");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("nana: {e}");
+                    1
+                }
+            }
+        }
+        Some(other) => {
+            eprintln!("nana: unknown memory command {other}");
+            2
+        }
+    }
+}
+
+fn persona_cmd(root: &Path, rest: &[String]) -> i32 {
+    match rest.first().map(String::as_str) {
+        None | Some("list") => {
+            let all = persona::list(Some(root));
+            if all.is_empty() {
+                println!(
+                    "no personas yet — nana --persona write <id>, or drop a .md in .nana/personas/"
+                );
+                return 0;
+            }
+            for p in all {
+                println!("{:<16} {:<32} {}", p.id, p.title, p.description);
+            }
+            0
+        }
+        Some("show") => {
+            let Some(id) = rest.get(1) else {
+                eprintln!("usage: nana --persona show <id>");
+                return 2;
+            };
+            match persona::load(Some(root), id) {
+                Some(p) => {
+                    println!("{}", p.prompt);
+                    0
+                }
+                None => {
+                    eprintln!("nana: no persona « {id} »");
+                    1
+                }
+            }
+        }
+        Some("write") => {
+            let Some(id) = rest.get(1) else {
+                eprintln!("usage: nana --persona write <id> [--user] <<'EOF' … EOF");
+                return 2;
+            };
+            let to_user = rest.iter().any(|a| a == "--user");
+            let mut body = String::new();
+            use std::io::Read;
+            if std::io::stdin().read_to_string(&mut body).is_err() || body.trim().is_empty() {
+                eprintln!("nana: nothing on stdin — pipe the prompt in");
+                return 2;
+            }
+            // the first line titles it, the rest is the prompt itself
+            let mut lines = body.lines();
+            let title = lines.next().unwrap_or(id).to_string();
+            let prompt: String = lines.collect::<Vec<_>>().join("\n");
+            let p = persona::Persona {
+                id: id.clone(),
+                title,
+                description: String::new(),
+                prompt: if prompt.trim().is_empty() {
+                    body.clone()
+                } else {
+                    prompt
+                },
+                path: PathBuf::new(),
+            };
+            let store = if to_user { None } else { Some(root) };
+            match persona::save(store, &p, !to_user) {
+                Ok(path) => {
+                    println!("wrote {}", path.display());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("nana: {e}");
+                    1
+                }
+            }
+        }
+        Some("delete") => {
+            let Some(id) = rest.get(1) else {
+                eprintln!("usage: nana --persona delete <id>");
+                return 2;
+            };
+            match persona::delete(Some(root), id) {
+                Ok(()) => {
+                    println!("deleted");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("nana: {e}");
+                    1
+                }
+            }
+        }
+        Some(other) => {
+            eprintln!("nana: unknown persona command {other}");
+            2
+        }
+    }
+}
+
+fn show_prompt(root: &Path, rest: &[String]) -> i32 {
+    let request = rest.join(" ");
+    let s = settings::Settings::load(root);
+    match agent::Agent::new(root, s.clone()) {
+        Ok(a) => {
+            println!("{}", a.system_prompt(&request));
+            0
+        }
+        Err(e) => {
+            // the prompt can still be shown without a usable client
+            eprintln!("nana: {e} (showing the prompt anyway)\n");
+            let a = agent::Agent::with_client(
+                root,
+                s,
+                provider::Client::local("http://127.0.0.1:1", "none"),
+            );
+            println!("{}", a.system_prompt(&request));
+            0
+        }
+    }
+}
+
+fn run_agent(root: &Path, rest: &[String]) -> i32 {
+    let resume = rest.iter().any(|a| a == "--resume");
+    let quiet = rest.iter().any(|a| a == "--quiet");
+    let request: String = rest
+        .iter()
+        .filter(|a| !a.starts_with("--"))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if request.trim().is_empty() {
+        eprintln!("usage: nana --agent [--resume] \"what you want done\"");
+        return 2;
+    }
+    let s = settings::Settings::load(root);
+    let mut a = match agent::Agent::new(root, s) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("nana: {e}");
+            return 1;
+        }
+    };
+    if resume {
+        if let Some(path) = a.resume_latest() {
+            if !quiet {
+                eprintln!("resumed {}", path.display());
+            }
+        }
+    }
+    let session = a.session.clone();
+    if !quiet {
+        eprintln!(
+            "model {} via {} — project {}",
+            a.client.model,
+            a.client.provider.label,
+            root.display()
+        );
+    }
+    let result = a.run(&request, |e| match e {
+        agent::Event::Started { .. } => {}
+        agent::Event::Text(t) => {
+            if !quiet {
+                println!("{t}");
+            }
+        }
+        agent::Event::ToolCall { name, args } => {
+            if !quiet {
+                eprintln!("→ {name} {}", short(&args.to_string(), 120));
+            }
+        }
+        agent::Event::ToolResult { name, ok, text } => {
+            if !quiet {
+                eprintln!(
+                    "{} {name} {}",
+                    if ok { "✓" } else { "✗" },
+                    short(text.trim(), 160)
+                );
+            }
+        }
+        agent::Event::Finished { steps } => {
+            if !quiet {
+                eprintln!("done in {steps} step(s) — transcript {}", session.display());
+            }
+        }
+        agent::Event::Error(e) => eprintln!("nana: {e}"),
+    });
+    match result {
+        Ok(_) => 0,
+        Err(_) => 1,
+    }
+}
+
+fn short(s: &str, n: usize) -> String {
+    let flat = s.replace('\n', " ");
+    if flat.chars().count() <= n {
+        flat
+    } else {
+        flat.chars().take(n).collect::<String>() + "…"
     }
 }
 

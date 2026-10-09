@@ -2095,6 +2095,18 @@ fn float_bg() -> Color {
     Color::Indexed(0)
 }
 
+/// Give a background band rounded ends: the powerline half-circles sit on the
+/// first and last cell of the row, in the band's own colour. This is what
+/// turns a selected row from a rectangle into a pill — the same language the
+/// bars already speak.
+fn round_band(buf: &mut ratatui::buffer::Buffer, y: u16, x0: u16, x1: u16, band: Color) {
+    if !icons_enabled() || x1 <= x0 {
+        return;
+    }
+    buf[(x0, y)].set_symbol(CAP_L).set_fg(band).set_bg(Ed::bg());
+    buf[(x1, y)].set_symbol(CAP_R).set_fg(band).set_bg(Ed::bg());
+}
+
 /// a rounded segment: the label, with a powerline half-circle on each end, so
 /// the bar reads as pills rather than as a row of blocks.
 fn put_pill(
@@ -2350,16 +2362,28 @@ fn draw_topbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
     let seg_bg = Color::Indexed(0);
     let buf = frame.buffer_mut();
     let mut x = area.x;
-    // brand
-    x = put_seg(
-        buf,
-        x,
-        area.y,
-        " nana ",
-        Color::Indexed(0),
-        Ed::accent(),
-        true,
-    ) + 1;
+    // brand: a rounded pill, so even the wordmark has no square corner
+    x = if icons_enabled() {
+        put_pill(
+            buf,
+            x,
+            area.y,
+            " nana ",
+            Color::Indexed(0),
+            Ed::accent(),
+            true,
+        )
+    } else {
+        put_seg(
+            buf,
+            x,
+            area.y,
+            " nana ",
+            Color::Indexed(0),
+            Ed::accent(),
+            true,
+        ) + 1
+    };
     // branche git
     if let Some(br) = &ed.git_branch {
         put_seg(
@@ -2377,10 +2401,11 @@ fn draw_topbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
     let mut right_x = area.right();
     if let Some(label) = &ed.project_label {
         let seg = format!(" {label} ");
-        let w = UnicodeWidthStr::width(seg.as_str()) as u16;
+        let pad = if icons_enabled() { 2u16 } else { 0 };
+        let w = UnicodeWidthStr::width(seg.as_str()) as u16 + 2 + pad;
         if right_x > area.x + w + 2 {
             right_x = right_x.saturating_sub(w);
-            put_seg(buf, right_x, area.y, &seg, Ed::dim(), seg_bg, false);
+            put_pill(buf, right_x, area.y, &seg, Ed::dim(), seg_bg, false);
         }
     }
     // breadcrumb centré : dossier › fichier ●
@@ -2448,9 +2473,11 @@ fn draw_statusbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
     right.push((pos_text(ed).trim().to_string(), Ed::dim()));
     let pct = ((ed.cy + 1) * 100) / ed.lines.len().max(1);
     right.push((format!("{pct}%"), Ed::dim()));
+    // a pill costs two columns more than a plain segment (its two caps)
+    let pad = if icons_enabled() { 4 } else { 2 };
     let total: u16 = right
         .iter()
-        .map(|(s, _)| UnicodeWidthStr::width(s.as_str()) as u16 + 2)
+        .map(|(s, _)| UnicodeWidthStr::width(s.as_str()) as u16 + pad)
         .sum();
     let mut rx = area.right().saturating_sub(total);
     // a fresh verdict pulses: bold for a moment, then calm
@@ -2459,7 +2486,12 @@ fn draw_statusbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
         .map(|t| t.elapsed() < Duration::from_millis(700))
         .unwrap_or(false);
     for (text, color) in right {
-        rx = put_seg(buf, rx, area.y, &format!(" {text} "), color, seg_bg, pulse);
+        let seg = format!(" {text} ");
+        rx = if icons_enabled() {
+            put_pill(buf, rx, area.y, &seg, color, seg_bg, pulse)
+        } else {
+            put_seg(buf, rx, area.y, &seg, color, seg_bg, pulse)
+        };
     }
 
     // left: what you are looking at, as a pill — the language while editing,
@@ -2482,6 +2514,7 @@ fn draw_statusbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
     } else {
         put_seg(buf, x, area.y, &padded, seg_bg, color, true) + 1
     };
+    let _ = x;
     // unsaved changes: a dot, not a second copy of the name
     if ed.file.is_some() && ed.modified {
         x = put_seg(buf, x, area.y, " ● ", Ed::accent(), seg_bg, false);
@@ -2625,14 +2658,23 @@ fn draw_search(frame: &mut Frame, fs: &mut FileSearch, zone: ratatui::layout::Re
             })
             .collect()
     };
-    frame.render_widget(
-        Paragraph::new(lines),
-        ratatui::layout::Rect {
-            y: inner.y + 2,
-            height: inner.height.saturating_sub(2),
-            ..inner
-        },
-    );
+    let list_area = ratatui::layout::Rect {
+        y: inner.y + 2,
+        height: inner.height.saturating_sub(2),
+        ..inner
+    };
+    frame.render_widget(Paragraph::new(lines), list_area);
+    // the highlighted result is a pill too
+    if sel >= start && sel < start + paths.len() {
+        let y = list_area.y + (sel - start) as u16;
+        round_band(
+            frame.buffer_mut(),
+            y,
+            list_area.x,
+            list_area.x + list_area.width.saturating_sub(1),
+            Ed::sel_row(),
+        );
+    }
 }
 
 /// Notifications toast — cartes flottantes empilées en haut à droite,
@@ -3021,6 +3063,17 @@ fn draw_explorer(frame: &mut Frame, ex: &mut Explorer, area: ratatui::layout::Re
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), rows_area);
+    // the selected row is a pill, not a strip
+    if sel >= start && sel < start + visible.len() {
+        let y = rows_area.y + (sel - start) as u16;
+        round_band(
+            frame.buffer_mut(),
+            y,
+            rows_area.x,
+            rows_area.x + rows_area.width.saturating_sub(1),
+            Ed::sel_row(),
+        );
+    }
 }
 
 /// Conversion couleur vt100 → ratatui (défaut = la palette Minuit).
@@ -3168,6 +3221,17 @@ fn draw_body(frame: &mut Frame, ed: &Editor, zone: ratatui::layout::Rect) {
         })
         .collect();
     frame.render_widget(Paragraph::new(text_lines), body[1]);
+    // the current line reads as a band with rounded ends, gutter included
+    let cur_row = body[1].y + (ed.cy - ed.scroll_y) as u16;
+    if cur_row >= body[1].y && cur_row < body[1].bottom() {
+        round_band(
+            frame.buffer_mut(),
+            cur_row,
+            body[0].x,
+            body[1].right().saturating_sub(1),
+            Ed::cur_line(),
+        );
+    }
 
     // repère subtil à la colonne 80 (la limite de la norme) — un filet discret
     let ruler_x = body[1].x + 80;
@@ -3293,6 +3357,23 @@ fn loop_run(terminal: &mut ratatui::DefaultTerminal, ed: &mut Editor) -> io::Res
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+/// a unique scratch directory per call. tests run in parallel inside one
+/// process: a name built from the pid alone gets trampled, and one test's
+/// cleanup then deletes another test's fixture mid-run.
+fn scratch(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "nana-{tag}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 #[cfg(test)]
@@ -3454,9 +3535,7 @@ mod pair_tests {
     /// après confirmation o.
     #[test]
     fn ops_fichiers_creer_renommer_supprimer() {
-        let dir = std::env::temp_dir().join(format!("cnano-ops-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("cnano-ops");
 
         let mut ed = Editor::open(None).unwrap();
         ed.explorer = Some(Explorer::new(dir.clone()));
@@ -3749,9 +3828,7 @@ mod diag_tests {
     /// Enter sur un fichier de l'explorateur l'ouvre dans l'éditeur.
     #[test]
     fn ouvrir_depuis_explorateur() {
-        let dir = std::env::temp_dir().join(format!("cnano-ed-{}-a", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("cnano-ed");
         let f = dir.join("solo.c");
         std::fs::write(
             &f,
@@ -3773,9 +3850,7 @@ mod diag_tests {
     /// Un buffer modifié ne se fait JAMAIS écraser par l'explorateur.
     #[test]
     fn buffer_modifie_bloque_le_changement() {
-        let dir = std::env::temp_dir().join(format!("cnano-ed-{}-b", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("cnano-ed");
         std::fs::write(
             dir.join("a.c"),
             "int a;
@@ -3836,9 +3911,7 @@ mod diag_tests {
     /// icônes de langage dans l'explorateur.
     #[test]
     fn boites_nues_et_icones() {
-        let dir = std::env::temp_dir().join(format!("cnano-ico-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("cnano-ico");
         std::fs::write(dir.join("a.c"), "int a;\n").unwrap();
         std::fs::write(dir.join("b.rs"), "fn b() {}\n").unwrap();
         let mut ed = Editor::open(None).unwrap();
@@ -3913,8 +3986,6 @@ mod diag_tests {
         assert_eq!(ed.focus, Focus::Search);
     }
 
-    /// ^O : la frappe filtre, Enter ouvre le fichier, Échap referme.
-    #[test]
     /// A search with a single result must still have room to draw: the float
     /// used to compute a height under the guard and disappear, leaving a
     /// focused panel with nothing on screen.
@@ -3933,11 +4004,10 @@ mod diag_tests {
         assert!(search_float_height(3, 4) < 6, "a tiny zone draws nothing");
     }
 
+    /// ^O : la frappe filtre, Enter ouvre le fichier, Échap referme.
     #[test]
     fn recherche_flottante_ouvre_un_fichier() {
-        let dir = std::env::temp_dir().join(format!("cnano-srch-{}-a", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("cnano-srch");
         let f = dir.join("cible.c");
         std::fs::write(
             &f,
