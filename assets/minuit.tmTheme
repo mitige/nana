@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>Minuit</string>
+	<key>settings</key>
+	<array>
+		<dict>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#F5F5F7</string>
+				<key>background</key>
+				<string>#141416</string>
+				<key>caret</key>
+				<string>#F5F5F7</string>
+				<key>selection</key>
+				<string>#2E2E33</string>
+				<key>lineHighlight</key>
+				<string>#1E1E21</string>
+				<key>gutterForeground</key>
+				<string>#3E3E42</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Commentaire</string>
+			<key>scope</key>
+			<string>comment</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#6E6E73</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Mot-clé de contrôle</string>
+			<key>scope</key>
+			<string>keyword.control, storage.modifier</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#FF7A93</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Préprocesseur</string>
+			<key>scope</key>
+			<string>meta.preprocessor</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#FFB86C</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Type</string>
+			<key>scope</key>
+			<string>storage.type, support.type, entity.name.type, entity.name.struct, entity.name.enum</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#64D2FF</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Fonction</string>
+			<key>scope</key>
+			<string>entity.name.function, support.function, variable.function</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#82A8F2</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Chaîne</string>
+			<key>scope</key>
+			<string>string</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#A6DA95</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Constante</string>
+			<key>scope</key>
+			<string>constant.numeric, constant.language, support.constant, constant.other</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#C6A0F6</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Opérateur</string>
+			<key>scope</key>
+			<string>keyword.operator</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#98989D</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Invalide</string>
+			<key>scope</key>
+			<string>invalid, invalid.illegal</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#FF453A</string>
+			</dict>
+		</dict>
+	</array>
+</dict>
+</plist>
