@@ -165,6 +165,184 @@ csv, diff, dotenv, gitconfig.
   language's checker plus a sober universal pass (trailing whitespace, tabs,
   final newline, line length). results land in the gutter and the status line.
 
+## the agent
+
+nana is also an agent. it reads your project, it can act on it, and it keeps
+what it learns — per project, on disk, in markdown you can read and edit.
+
+### the panel
+
+`ctrl+a` opens the agent. the card takes the keyboard: type your request,
+`enter` sends it, `esc` closes the card — and `esc` again while it is thinking
+cancels the request.
+
+the card shows the whole exchange as it happens:
+
+```
+you   read src/langs.rs and tell me how many languages the registry declares
+->    read_file {"path": "src/langs.rs"}
+ok    read_file 1 | //! the language registry.
+nana  the registry declares 105 languages, including forth, cobol and prolog.
+```
+
+the answer streams in, the tool calls are shown with their arguments, and a
+refusal is shown too — nothing is hidden from you.
+
+### the tools it has
+
+| tool | what it does |
+| --- | --- |
+| `read_file` | read a file of the project, lines numbered |
+| `write_file` | write a file, creating it or replacing it |
+| `edit_file` | replace one exact passage, refused if ambiguous |
+| `list_dir` | list a directory |
+| `grep` | search the project, `file:line` matches |
+| `run_shell` | run a command inside the project |
+| `memory_list` / `memory_read` / `memory_write` | the project's memory |
+
+two rules hold everywhere: **every path is resolved inside the project and
+checked**, and **a destructive command is refused**. `rm -rf`, `dd of=`,
+`git reset --hard`, `git push --force`, `sudo`, `mkfs` and friends are
+recognised before they run; the refusal is handed back to the model, which
+sees it and changes plan instead of pretending it worked.
+
+### memory, scoped to one project
+
+`<project>/.nana/memory/<class>/<name>.md`, four classes: `user` (who you
+are), `feedback` (what you told the agent about itself), `project` (stack,
+conventions, decisions), `reference` (pointers).
+
+memory is **scoped by construction**: an agent opened in one project cannot
+read or write another project's memory. that is what keeps it useful instead
+of bloated. the prompt carries only the index — names, not contents — and the
+agent reads a page when it becomes relevant.
+
+```sh
+nana --memory list
+nana --memory search "convention"
+nana --memory show project stack
+nana --memory write project stack <<'EOF'
+rust, no async, every feature gets a test
+EOF
+```
+
+### providers
+
+one client, three wire shapes (openai-compatible, anthropic, gemini) covering
+openai, anthropic, gemini, alibaba dashscope, openrouter, ollama and agentic
+press. the **model name picks the endpoint**:
+
+| model name contains | provider |
+| --- | --- |
+| `claude`, `sonnet`, `opus`, `haiku` | anthropic |
+| `gemini` | google |
+| `qwen`, `kimi`, `deepseek`, `glm` | alibaba dashscope |
+| `gpt-`, `o3`, `o4` | openai |
+| `llama`, `mistral`, `phi`, `gemma` | ollama, local, no key |
+| `openrouter/…` | openrouter |
+| anything else | your own openai-compatible `/v1` |
+
+a key is looked up for its own provider only — from the environment, then from
+`~/.dsh/.credentials.yaml` — and it never travels to another vendor. it is not
+printed, not logged, and masked even in a debug dump.
+
+```sh
+nana --providers          # who can answer, and whether the key is there
+```
+
+to point nana at anything: `.nana/settings.json`
+
+```json
+{ "model": "llama3.1", "base_url": "http://127.0.0.1:11434/v1" }
+```
+
+### personas
+
+a persona is a saved system prompt: a role, a tone, a way of working. it is
+markdown with a small header, so you can write and edit it in nana itself.
+
+```sh
+nana --persona write reviewer <<'EOF'
+The Reviewer
+read code like a colleague: precise, direct, no flattery. name the file and line.
+EOF
+nana --persona list
+```
+
+project personas live in `<project>/.nana/personas/`, yours in
+`~/.config/nana/personas/`; the project's one wins on a name clash. set a
+default with `{"persona": "reviewer"}`.
+
+### skills
+
+a skill is a packaged workflow the agent picks up when your request matches
+its trigger. `<project>/.nana/skills/*.md` or the portable
+`skills/<name>/SKILL.md`:
+
+```markdown
+---
+name: release
+description: cut a release of nana
+trigger: release, tag, changelog
+---
+1. bump the version in Cargo.toml
+2. run cargo test and paste the result line
+3. write the changelog
+4. tag it and push
+```
+
+say "cut a release" and the body is handed to the model, which follows it.
+
+### project instructions
+
+`AGENTS.md` at the root of the repository is read into every prompt. write
+your rules there once — how you name things, what you refuse, what "done"
+means — and the agent works to them.
+
+`nana --show-prompt "…"` prints exactly what the model receives, section by
+section, so you never have to guess what the agent was told.
+
+### conversations
+
+every exchange is kept as json lines in `<project>/.nana/sessions/`, one line
+per message: your request, the answer, each tool call and its result. it is
+plain text you can grep or delete.
+
+```sh
+nana --agent "what does src/diag.rs do?"
+nana --agent --resume "and the perl dialect?"   # continues yesterday's thread
+```
+
+`.nana/` is git-ignored: it is your notes about your project, not the project.
+
+### from the shell
+
+everything the panel does is also a command, which is how it gets tested:
+
+```sh
+nana --agent "…"        one request, every step printed as it runs
+nana --show-prompt "…"  the assembled system prompt
+nana --providers        the provider table
+nana --memory …         the project's memory
+nana --persona …        saved system prompts
+nana --skills           what this project can hand the agent
+```
+
+### how the prompt is built
+
+sections, in order: identity, **persona**, `AGENTS.md`, the skill index, the
+matched skills, the memory index, the tool rules, the working directory.
+the persona sits right after the identity, before everything else — so what
+you wrote is what frames the work.
+
+### what is not there yet
+
+the second half of 2.0 is being built: dedicated panels for memory,
+providers, skills, mcp servers, plugins, agent teams, scheduled jobs and
+documents; an mcp client; plan mode. today those live on the command line.
+what exists is verified end to end — the test suite drives a real http server
+for the client, and a real tool loop for the agent.
+
 ## configuration
 
 optional, created commented-out on first run at `~/.config/nana/config.toml`:
@@ -181,13 +359,17 @@ final_newline = true
 
 - no language server: completion, refactors and go-to-definition are not there.
 - one buffer: no splits, no tabs.
-- the ghost completion needs an openai-compatible key in the environment; the
-  editor is fully usable without it.
+- the agent needs an api key for its provider; the editor itself is fully
+  usable without one.
+- the ghost completion (`ctrl+e`) is the least finished part: it needs a key
+  and a model that follows instructions closely.
+- memory is per project by design, so it never becomes one giant store — and
+  it never crosses projects either.
 
 ## development
 
 ```sh
-cargo test        # 113 tests, no network, no fixtures to download
+cargo test        # 161 tests, no network, no fixtures to download
 cargo run         # the editor, on this repository
 cargo run -- --languages
 ```

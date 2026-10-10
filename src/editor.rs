@@ -37,6 +37,9 @@ const EDITOR_MODEL: &str = "deepseek-v4.1-flash";
 const STATUS_TTL: Duration = Duration::from_secs(4);
 /// the last stretch of that life, during which the line dims out.
 const FADE_OUT: Duration = Duration::from_millis(900);
+/// how long the verdict stays in the corner after a check. it is news, not
+/// furniture: it fades, and the next save brings it back.
+const CHECK_TTL: Duration = Duration::from_secs(10);
 /// a toast slides in over this long, then sits still.
 const SLIDE_IN: Duration = Duration::from_millis(160);
 /// how long a toast lives, and how long it spends fading out.
@@ -309,6 +312,112 @@ const MINUIT_PALETTE: [&str; 16] = [
     "ff8fa3", "b8e6a8", "ffd9a0", "a8c8ff", "e8c4ff", "a5e6ef", "f5f5f5",
 ];
 
+/// the agent panel: a rounded card with the conversation on top and a prompt
+/// line at the bottom. it owns the keyboard while it is open — esc closes it,
+/// and esc again while it is thinking cancels the request.
+struct AgentPane {
+    input: String,
+    /// the transcript as it arrives: (kind, text)
+    lines: Vec<(String, String)>,
+    scroll: usize,
+    rx: Option<Receiver<crate::agent::Event>>,
+    busy: bool,
+    status: String,
+}
+
+impl AgentPane {
+    fn new() -> AgentPane {
+        AgentPane {
+            input: String::new(),
+            lines: vec![(
+                "note".into(),
+                "ask for something in this project. enter sends, esc closes.".into(),
+            )],
+            scroll: 0,
+            rx: None,
+            busy: false,
+            status: String::new(),
+        }
+    }
+
+    /// start a request on a worker thread; the events come back one by one.
+    fn send(&mut self, root: &Path) {
+        let request = self.input.trim().to_string();
+        if request.is_empty() || self.busy {
+            return;
+        }
+        self.input.clear();
+        self.lines.push(("you".into(), request.clone()));
+        self.scroll = 0;
+        self.busy = true;
+        self.status = "thinking".into();
+        let (tx, rx) = channel();
+        self.rx = Some(rx);
+        let root = root.to_path_buf();
+        std::thread::spawn(move || {
+            let settings = crate::settings::Settings::load(&root);
+            match crate::agent::Agent::new(&root, settings) {
+                Ok(mut agent) => {
+                    let _ = agent.run(&request, |event| {
+                        let _ = tx.send(event);
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(crate::agent::Event::Error(e));
+                }
+            }
+        });
+    }
+
+    /// fold whatever the worker produced since the last frame.
+    fn poll(&mut self) {
+        let Some(rx) = &self.rx else {
+            return;
+        };
+        let mut done = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::agent::Event::Started {
+                    model, provider, ..
+                } => {
+                    self.status = format!("{model} via {provider}");
+                }
+                crate::agent::Event::Text(t) => self.lines.push(("agent".into(), t)),
+                crate::agent::Event::ToolCall { name, args } => self
+                    .lines
+                    .push(("tool".into(), format!("{name} {}", short_json(&args)))),
+                crate::agent::Event::ToolResult { name, ok, text } => self.lines.push((
+                    if ok { "ok".into() } else { "refused".into() },
+                    format!("{name}: {}", text.trim()),
+                )),
+                crate::agent::Event::Finished { steps } => {
+                    self.status = format!("done in {steps} step(s)");
+                    done = true;
+                }
+                crate::agent::Event::Error(e) => {
+                    self.lines.push(("error".into(), e));
+                    self.status = "failed".into();
+                    done = true;
+                }
+            }
+        }
+        if done {
+            self.busy = false;
+            self.rx = None;
+        }
+    }
+}
+
+/// one line of json, short enough for the transcript.
+fn short_json(v: &serde_json::Value) -> String {
+    let s = v.to_string().replace('\n', " ");
+    if s.chars().count() <= 70 {
+        s
+    } else {
+        s.chars().take(70).collect::<String>() + "…"
+    }
+}
+
 /// Niveau d'une notification toast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Level {
@@ -371,6 +480,8 @@ pub struct Editor {
     ext: String,
     /// client IA possédé (pour la complétion)
     ai: Option<AiClient>,
+    /// the agent panel (^a): a conversation with the project's agent
+    agent_pane: Option<AgentPane>,
     /// explorateur de fichiers (^T, ou `c-nano <dossier>`)
     explorer: Option<Explorer>,
     /// recherche de fichiers flottante (^O, façon Telescope)
@@ -521,6 +632,7 @@ impl Editor {
             history: Vec::new(),
             ext,
             ai: None,
+            agent_pane: None,
             explorer: None,
             search: None,
             focus: Focus::Editor,
@@ -991,6 +1103,13 @@ impl Editor {
         self.status = "in progress… (esc : cancel)".into();
     }
 
+    /// collect what the agent worker produced, each frame.
+    fn poll_agent(&mut self) {
+        if let Some(pane) = &mut self.agent_pane {
+            pane.poll();
+        }
+    }
+
     fn poll_check(&mut self) {
         let Some(rx) = &self.check_rx else {
             return;
@@ -1128,7 +1247,7 @@ impl Editor {
             || self.status_age() < STATUS_TTL
             || self
                 .check_at
-                .map(|t| t.elapsed() < Duration::from_millis(700))
+                .map(|t| t.elapsed() < CHECK_TTL)
                 .unwrap_or(false)
     }
 
@@ -1534,6 +1653,39 @@ impl Editor {
         self.focus = order[(pos + 1) % order.len()];
     }
 
+    // ------------------------------------------------------------------ agent
+
+    fn agent_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(pane) = self.agent_pane.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                if pane.busy {
+                    pane.busy = false;
+                    pane.rx = None;
+                    pane.lines
+                        .push(("note".into(), "cancelled — the answer is dropped".into()));
+                    pane.status = "cancelled".into();
+                } else {
+                    self.agent_pane = None;
+                }
+            }
+            KeyCode::Enter => {
+                let root = file_dir(self.file.as_deref());
+                pane.send(&root);
+            }
+            KeyCode::Backspace => {
+                pane.input.pop();
+            }
+            KeyCode::Up => pane.scroll = pane.scroll.saturating_add(1),
+            KeyCode::Down => pane.scroll = pane.scroll.saturating_sub(1),
+            KeyCode::Char(c) if !ctrl => pane.input.push(c),
+            _ => {}
+        }
+    }
+
     // -------------------------------------------------------------- recherche
 
     /// ^O : la recherche de fichiers flottante (façon Telescope).
@@ -1741,6 +1893,16 @@ impl Editor {
     fn on_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+        // the agent panel is modal: while it is open it owns the keyboard
+        if self.agent_pane.is_some() {
+            return self.agent_key(key);
+        }
+        if ctrl && key.code == KeyCode::Char('a') {
+            self.agent_pane = Some(AgentPane::new());
+            self.status = "agent — type a request, enter sends, esc closes".into();
+            return;
+        }
 
         if self.confirm_quit {
             match key.code {
@@ -2060,6 +2222,21 @@ fn pos_text(ed: &Editor) -> String {
 /// Remplit une zone d'une couleur unie (fond d'éditeur, barres).
 fn fill(frame: &mut Frame, area: ratatui::layout::Rect, style: Style) {
     frame.render_widget(Paragraph::new("").style(style), area);
+}
+
+/// Erase a rectangle for a floating card. The cells are blanked and given the
+/// terminal's *own* background (`Reset`), never a colour of ours: the blur of
+/// the terminal still shows through, but the editor behind does not — two
+/// texts drawn on top of each other is not transparency, it is a mess.
+fn clear_area(frame: &mut Frame, area: ratatui::layout::Rect) {
+    let buf = frame.buffer_mut();
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.reset();
+            }
+        }
+    }
 }
 
 /// Expand tabs for display only. A tab written into one cell makes the
@@ -2415,6 +2592,9 @@ fn draw(frame: &mut Frame, ed: &mut Editor) {
     if let Some(fs) = &mut ed.search {
         draw_search(frame, fs, chunks[1], ed.focus == Focus::Search);
     }
+    if let Some(pane) = &mut ed.agent_pane {
+        draw_agent(frame, pane, chunks[1]);
+    }
     draw_toasts(frame, ed, area);
 
     draw_statusbar(frame, ed, chunks[2]);
@@ -2516,16 +2696,20 @@ fn draw_statusbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
     // the only place the verdict lives — no copy in the top bar, none in the
     // transient line, no toast.
     let mut right: Vec<(String, Color)> = Vec::new();
+    let check_age = ed.check_at.map(|t| t.elapsed());
+    let check_fresh = check_age.map(|a| a < CHECK_TTL).unwrap_or(true);
     if let Some(note) = &ed.check_note {
-        let bad = ed.check_marks.iter().any(|(_, s)| *s == Severity::Major);
-        let color = if bad {
-            Ed::red()
-        } else if ed.check_marks.is_empty() {
-            Ed::green()
-        } else {
-            Ed::amber()
-        };
-        right.push((note.clone(), color));
+        if check_fresh {
+            let bad = ed.check_marks.iter().any(|(_, s)| *s == Severity::Major);
+            let color = if bad {
+                Ed::red()
+            } else if ed.check_marks.is_empty() {
+                Ed::green()
+            } else {
+                Ed::amber()
+            };
+            right.push((note.clone(), color));
+        }
     }
     right.push((pos_text(ed).trim().to_string(), Ed::dim()));
     let pct = ((ed.cy + 1) * 100) / ed.lines.len().max(1);
@@ -2544,11 +2728,28 @@ fn draw_statusbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
         .unwrap_or(false);
     for (text, color) in right {
         let seg = format!(" {text} ");
+        let before = rx;
         rx = if icons_enabled() {
             put_pill(buf, rx, area.y, &seg, color, seg_bg, pulse)
         } else {
             put_seg(buf, rx, area.y, &seg, color, seg_bg, pulse)
         };
+        // the verdict dims out at the end of its life, then goes
+        let fading = text.starts_with("norm")
+            && check_age
+                .map(|a| a > CHECK_TTL.saturating_sub(FADE_OUT * 2))
+                .unwrap_or(false);
+        if fading {
+            buf.set_style(
+                ratatui::layout::Rect {
+                    x: before,
+                    y: area.y,
+                    width: rx.saturating_sub(before),
+                    height: 1,
+                },
+                Style::default().add_modifier(Modifier::DIM),
+            );
+        }
     }
 
     // left: what you are looking at, as a pill — the language while editing,
@@ -2638,6 +2839,113 @@ fn search_float_height(results: usize, zone_height: u16) -> u16 {
     (rows + 4).max(6).min(zone_height.saturating_sub(2))
 }
 
+/// The agent card: transcript on top, prompt at the bottom, rounded like
+/// everything else. it overlays the editor, and the terminal paints its own
+/// background underneath.
+fn draw_agent(frame: &mut Frame, pane: &mut AgentPane, zone: ratatui::layout::Rect) {
+    let w = zone.width.saturating_sub(8).min(84);
+    let h = (zone.height.saturating_sub(4)).min(20);
+    if w < 30 || h < 8 {
+        return;
+    }
+    let float = ratatui::layout::Rect {
+        x: zone.x + (zone.width - w) / 2,
+        y: zone.y + (zone.height - h) / 2,
+        width: w,
+        height: h,
+    };
+    clear_area(frame, float);
+    let title = if pane.busy {
+        format!(" agent · {} ", pane.status)
+    } else {
+        " agent ".to_string()
+    };
+    let inner = draw_box(frame, float, &[(title, Ed::cyan())], Ed::cyan());
+
+    // transcript, wrapped, newest at the bottom
+    let body_h = inner.height.saturating_sub(2) as usize;
+    let mut rendered: Vec<Line> = Vec::new();
+    for (kind, text) in &pane.lines {
+        let (label, color) = match kind.as_str() {
+            "you" => ("you  ", Ed::accent()),
+            "agent" => ("nana ", Ed::cyan()),
+            "tool" => ("->   ", Ed::amber()),
+            "ok" => ("ok   ", Ed::green()),
+            "refused" => ("no   ", Ed::red()),
+            "error" => ("err  ", Ed::red()),
+            _ => ("     ", Ed::gutter()),
+        };
+        let mut first = true;
+        for chunk in wrap(text, inner.width.saturating_sub(6) as usize) {
+            rendered.push(Line::from(vec![
+                Span::styled(
+                    if first { label } else { "     " },
+                    Style::default().fg(color),
+                ),
+                Span::styled(chunk, Style::default().fg(Ed::text())),
+            ]));
+            first = false;
+        }
+    }
+    let start = rendered.len().saturating_sub(body_h + pane.scroll);
+    let end = (start + body_h).min(rendered.len());
+    let view: Vec<Line> = rendered[start..end].to_vec();
+    frame.render_widget(
+        Paragraph::new(view),
+        ratatui::layout::Rect {
+            height: (body_h as u16).min(inner.height),
+            ..inner
+        },
+    );
+
+    // the prompt line sits at the bottom of the card
+    let prompt = Line::from(vec![
+        Span::styled("> ", Style::default().fg(Ed::accent())),
+        Span::styled(pane.input.clone(), Style::default().fg(Ed::text())),
+        Span::styled(
+            if pane.busy { "…" } else { "_" },
+            Style::default().fg(if pane.busy { Ed::amber() } else { Ed::cyan() }),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(prompt),
+        ratatui::layout::Rect {
+            y: inner.bottom().saturating_sub(1),
+            height: 1,
+            ..inner
+        },
+    );
+}
+
+/// Wrap a paragraph to `width` columns, on words.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut cur = String::new();
+        for word in paragraph.split_whitespace() {
+            let cand = if cur.is_empty() {
+                word.to_string()
+            } else {
+                format!("{cur} {word}")
+            };
+            if UnicodeWidthStr::width(cand.as_str()) > width && !cur.is_empty() {
+                out.push(cur);
+                cur = word.to_string();
+            } else {
+                cur = cand;
+            }
+        }
+        out.push(cur);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
 fn draw_search(frame: &mut Frame, fs: &mut FileSearch, zone: ratatui::layout::Rect, focused: bool) {
     let w = zone.width.saturating_sub(8).min(62);
     let h = search_float_height(fs.len(), zone.height);
@@ -2650,7 +2958,7 @@ fn draw_search(frame: &mut Frame, fs: &mut FileSearch, zone: ratatui::layout::Re
         width: w,
         height: h,
     };
-    fill(frame, float, Style::default().bg(float_bg()));
+    clear_area(frame, float);
     let title = format!(" search · {} ", fs.len());
     let inner = draw_box(frame, float, &[(title, Ed::text())], border_for(focused));
     // prompt
@@ -2792,7 +3100,7 @@ fn draw_toasts(frame: &mut Frame, ed: &mut Editor, area: ratatui::layout::Rect) 
             width: w,
             height: h,
         };
-        fill(frame, rect, Style::default().bg(float_bg()));
+        clear_area(frame, rect);
         let (icon, color) = match toast.level {
             Level::Ok => ("✓", Ed::green()),
             Level::Err => ("✗", Ed::red()),
@@ -2874,7 +3182,7 @@ fn draw_diagnostics(frame: &mut Frame, ed: &Editor, zone: ratatui::layout::Rect)
         width: w,
         height: h,
     };
-    fill(frame, rect, Style::default().bg(float_bg()));
+    clear_area(frame, rect);
     let any_err = items.iter().any(|(e, _)| *e);
     let border = if any_err { Ed::red() } else { Ed::amber() };
     let title = format!(" line {} ", ed.cy + 1);
@@ -3393,6 +3701,7 @@ fn kitty_keyboard() -> bool {
 fn loop_run(terminal: &mut ratatui::DefaultTerminal, ed: &mut Editor) -> io::Result<()> {
     while !ed.should_quit {
         ed.tick_status();
+        ed.poll_agent();
         ed.poll_ai();
         ed.poll_check();
         ed.poll_diag();
@@ -3791,6 +4100,107 @@ mod pair_tests {
         ed.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::empty()));
         ed.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
         assert_eq!(ed.lines[0], "ééxéé");
+    }
+}
+
+#[cfg(test)]
+mod float_tests {
+    use super::*;
+
+    /// A floating card erases what it covers: no code bleeding through the
+    /// text of the card. Transparency is the terminal's background, not a
+    /// window onto the editor.
+    #[test]
+    fn a_card_erases_the_text_under_it() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.lines = (0..14)
+            .map(|i| format!("SECRET_LINE_{i}_SHOULD_NOT_SHOW_THROUGH"))
+            .collect();
+        ed.file = Some(std::path::PathBuf::from("x.py"));
+        ed.ext = "py".into();
+        ed.modified = true;
+        ed.agent_pane = Some(AgentPane::new());
+        let text = render_text(&mut ed, 100, 30);
+        assert!(
+            !text.contains("SECRET_LINE_5"),
+            "the editor shows through the card:\n{text}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod agent_pane_tests {
+    use super::*;
+
+    fn typed(ed: &mut Editor, text: &str) {
+        for c in text.chars() {
+            ed.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+        }
+    }
+
+    #[test]
+    fn ctrl_a_opens_the_agent_and_it_owns_the_keyboard() {
+        let mut ed = Editor::open(None).unwrap();
+        assert!(ed.agent_pane.is_none());
+        ed.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(ed.agent_pane.is_some(), "the panel opens");
+        typed(&mut ed, "hello");
+        assert_eq!(ed.agent_pane.as_ref().unwrap().input, "hello");
+        // the editor buffer never saw those keys
+        assert!(ed.lines.iter().all(|l| !l.contains("hello")));
+        // esc closes it
+        ed.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(ed.agent_pane.is_none());
+    }
+
+    #[test]
+    fn esc_while_it_thinks_cancels_instead_of_closing() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        let pane = ed.agent_pane.as_mut().unwrap();
+        pane.busy = true;
+        ed.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        let pane = ed.agent_pane.as_ref().expect("the panel stays open");
+        assert!(!pane.busy, "the wait is dropped");
+        assert!(
+            pane.lines.iter().any(|(_, t)| t.contains("cancelled")),
+            "{:?}",
+            pane.lines
+        );
+    }
+
+    #[test]
+    fn enter_on_an_empty_prompt_does_nothing() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        let before = ed.agent_pane.as_ref().unwrap().lines.len();
+        ed.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        let pane = ed.agent_pane.as_ref().unwrap();
+        assert_eq!(pane.lines.len(), before, "nothing was sent");
+        assert!(pane.rx.is_none(), "and no worker was started");
+    }
+
+    #[test]
+    fn the_card_is_drawn_with_rounded_corners() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        let text = render_text(&mut ed, 100, 30);
+        assert!(text.contains("agent"), "{text}");
+        assert!(text.contains('╭') && text.contains('╯'), "rounded: {text}");
+        assert!(
+            !text.contains('┌') && !text.contains('└'),
+            "no square corner"
+        );
+    }
+
+    #[test]
+    fn wrapping_keeps_every_word() {
+        let lines = wrap("one two three four five six", 11);
+        assert!(lines.len() > 1, "{lines:?}");
+        assert_eq!(lines.join(" "), "one two three four five six");
+        assert!(lines.iter().all(|l| l.len() <= 11), "{lines:?}");
+        // a newline in the answer starts a new line
+        assert_eq!(wrap("a\nb", 40).len(), 2);
     }
 }
 
