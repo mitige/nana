@@ -2,7 +2,7 @@
 
 an adaptive terminal editor. one buffer, every language.
 
-version 2.1.0.
+version 2.2.0.
 
 ![nana, the welcome screen](docs/shots/test1.png)
 
@@ -19,7 +19,7 @@ it is written in rust, it is a single static binary, and it starts instantly.
 ## why
 
 most editors make you configure languages one by one. nana ships the knowledge
-instead: **105 languages**, their comment syntax, their checker, their run
+instead: **107 languages**, their comment syntax, their checker, their run
 recipe, their formatter, their icon — plus project detection for the common
 build systems and frameworks. the whole table lives in one file
 ([`src/langs.rs`](src/langs.rs)), so adding a language is adding a row.
@@ -40,16 +40,29 @@ modern shells start cleanly inside it.
 
 ## install
 
+linux (any distribution, x86_64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mitige/nana/main/install.sh | sh
+```
+
+windows (powershell):
+
+```powershell
+irm https://raw.githubusercontent.com/mitige/nana/main/install.ps1 | iex
+```
+
+both fetch the latest release, put `nana` in `~/.local/bin` (linux) or
+`%LOCALAPPDATA%\nana\bin` (windows), and add that folder to your PATH.
+set `NANA_INSTALL_DIR` to choose another folder.
+
 from source (rust 1.75+):
 
 ```sh
-git clone https://github.com/mitige/nana
-cd nana
-cargo build --release
-install -m755 target/release/nana ~/.local/bin/nana
+cargo install --git https://github.com/mitige/nana
 ```
 
-or straight from this checkout:
+or from this checkout:
 
 ```sh
 cargo install --path .
@@ -86,7 +99,7 @@ nana src          # opens a directory
 
 ## languages
 
-105 rows today. the checker column is what `ctrl+b` runs; the run column is
+107 rows today. the checker column is what `ctrl+b` runs; the run column is
 what `f5` runs for a single file (in a project, the project command wins).
 
 | language | extensions | checker | run |
@@ -133,7 +146,7 @@ the full list, generated from the registry:
 nana --languages
 ```
 
-105 languages, from ada to zig, including the ones people forget: forth, cobol,
+107 languages, from ada to zig, including the ones people forget: forth, cobol,
 prolog, smalltalk, brainfuck-adjacent oddities aside — webassembly (`wat`),
 llvm ir (`ll`), glsl and wgsl for the gpu, protobuf, thrift, graphql, terraform,
 ansible, nginx, vimscript, emacs lisp, org, restructuredtext, asciidoc, typst,
@@ -181,7 +194,7 @@ the card shows the whole exchange as it happens:
 you   read src/langs.rs and tell me how many languages the registry declares
 ->    read_file {"path": "src/langs.rs"}
 ok    read_file 1 | //! the language registry.
-nana  the registry declares 105 languages, including forth, cobol and prolog.
+nana  the registry declares 107 languages, including forth, cobol and prolog.
 ```
 
 the answer streams in, the tool calls are shown with their arguments, and a
@@ -435,7 +448,7 @@ you wrote is what frames the work.
 
 ### what is not there yet
 
-not in 2.0 yet: dedicated panels for mcp servers, plugins, agent teams,
+not in 2.2 yet: dedicated panels for mcp servers, plugins, agent teams,
 scheduled jobs and documents; an mcp client; plan mode. the hub, the company,
 memory, providers, skills and personas are in; the rest is on the roadmap.
 what exists is verified end to end — the test suite drives a real http server
@@ -467,7 +480,7 @@ final_newline = true
 ## development
 
 ```sh
-cargo test        # 212 tests, no network, no fixtures to download
+cargo test        # 312 tests, no network, no fixtures to download
 cargo run         # the editor, on this repository
 cargo run -- --languages
 ```

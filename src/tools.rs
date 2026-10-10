@@ -1,7 +1,7 @@
 //! the agent's hands: files, grep, a shell, and its own memory.
 //!
 //! every path the agent names is resolved inside the project and checked
-//! against it — the sandbox is on by default, so a tool call cannot wander
+//! against it — the sandbox is off by default, so a tool call may wander
 //! into your home directory. commands that destroy things are recognised and
 //! refused with an explanation rather than executed quietly.
 

@@ -1,5 +1,14 @@
 # changelog
 
+## 2.2.0
+
+- one-line installs: `install.sh` for linux, `install.ps1` for windows. both
+  fetch the latest release and put `nana` on your PATH.
+- every tag builds and publishes the two archives, after the tests pass.
+- the agent menu is a centred card on a clean screen: the trail lane is gone.
+- the agent's sandbox is off by default.
+- README: 107 languages, 312 tests, install section rewritten.
+
 ## 2.1.0
 
 - memory is a world model: each page carries a confidence, a date and an

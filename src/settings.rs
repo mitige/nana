@@ -82,9 +82,9 @@ impl Settings {
         }
     }
 
-    /// sandboxed by default: the agent works in its project, not in your home.
+    /// off by default: the agent may reach outside its project unless asked to stay in.
     pub fn sandbox_enabled(&self) -> bool {
-        self.sandbox.unwrap_or(true)
+        self.sandbox.unwrap_or(false)
     }
 
     pub fn save_user(&self) -> std::io::Result<PathBuf> {
@@ -145,9 +145,9 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_sandboxed_and_silent() {
+    fn defaults_are_open_and_silent() {
         let s = Settings::default();
-        assert!(s.sandbox_enabled());
+        assert!(!s.sandbox_enabled());
         assert!(s.model.is_none());
     }
 
@@ -162,7 +162,7 @@ mod tests {
         let s = Settings::load(&d);
         assert_eq!(s.model.as_deref(), Some("project-model"));
         assert_eq!(s.temperature, Some(0.2));
-        assert!(s.sandbox_enabled(), "an untouched key keeps its default");
+        assert!(!s.sandbox_enabled(), "an untouched key keeps its default");
         let _ = std::fs::remove_dir_all(&d);
     }
 

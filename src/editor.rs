@@ -18,7 +18,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::Paragraph,
     Frame,
 };
 use std::collections::HashMap;
@@ -580,12 +580,18 @@ fn short_json(v: &serde_json::Value) -> String {
 /// terminal prompt, `$ ls`, so the eye knows the agent ran it; any other tool
 /// keeps its name and its json arguments.
 fn terminal_header(name: &str, args: &serde_json::Value) -> String {
-    if name == "run_shell" {
-        if let Some(command) = args.get("command").and_then(|c| c.as_str()) {
-            return format!("$ {}", command.replace('\n', " "));
-        }
+    let arg = |key: &str| args.get(key).and_then(|c| c.as_str()).unwrap_or("");
+    let command = match name {
+        "run_shell" => Some(arg("command").replace('\n', " ")),
+        "list_dir" => Some(format!("ls {}", arg("path"))),
+        "read_file" => Some(format!("cat {}", arg("path"))),
+        "grep" => Some(format!("grep {} {}", arg("pattern"), arg("path"))),
+        _ => None,
+    };
+    match command {
+        Some(command) => format!("$ {}", command.trim_end()),
+        None => format!("> {name} {}", short_json(args)),
     }
-    format!("> {name} {}", short_json(args))
 }
 
 /// what a cell is allowed to show. text from the agent or from a file can carry
@@ -3427,11 +3433,10 @@ fn draw_scene(frame: &mut Frame, ed: &mut Editor) {
         // the agent's view is the background; the card clears its own rectangle
         // on top of it, so what is behind never shows through the card.
         clear_area(frame, area);
-        let (card_zone, _) = agent_layout(area);
+        let card_zone = area;
         let playing = !ed.live.is_empty();
         draw_agent_view(frame, &ed.agent_view, card_zone, playing);
         draw_agent(frame, pane, card_zone);
-        draw_trail_band(frame, pane, area);
         draw_toasts(frame, ed, area);
         return;
     }
@@ -3837,36 +3842,6 @@ fn draw_hub(frame: &mut Frame, hub: &mut crate::hub::Hub, zone: ratatui::layout:
     frame.render_widget(Paragraph::new(body), inner);
 }
 
-/// the band under the centred agent card, where the trail is drawn. the card
-/// gives up its bottom rows to the band, so the trail always has room on an
-/// ordinary terminal: a card that filled the screen left no place for it.
-fn agent_layout(zone: ratatui::layout::Rect) -> (ratatui::layout::Rect, ratatui::layout::Rect) {
-    const TRAIL_H: u16 = 12;
-    let body = ratatui::layout::Rect {
-        height: zone.height.saturating_sub(TRAIL_H),
-        ..zone
-    };
-    let card = ratatui::layout::Rect {
-        x: body.x,
-        y: body.y,
-        width: body.width,
-        height: body.height,
-    };
-    let band = ratatui::layout::Rect {
-        x: zone.x,
-        y: zone.y + body.height,
-        width: zone.width,
-        height: zone.height - body.height,
-    };
-    (card, band)
-}
-
-fn draw_trail_band(frame: &mut Frame, pane: &AgentPane, zone: ratatui::layout::Rect) {
-    let (_, band) = agent_layout(zone);
-    clear_area(frame, band);
-    draw_trail(frame, pane, band);
-}
-
 /// the agent's own view of its file: its lines and its cursor, in its own box,
 /// separate from the user's buffer.
 fn draw_agent_view(
@@ -3979,58 +3954,6 @@ fn draw_agent_cursor(
 /// resolved: the cursor and the scroll must agree with what the cells show.
 fn drawn_width(prefix: &str) -> usize {
     safe_text(prefix).chars().count()
-}
-
-/// the agent's trail, drawn behind its card: one row per lane over the time of
-/// the conversation, then the steps as a list. the ide is not drawn here, the
-/// screen is the agent's own record of what it did.
-fn draw_trail(frame: &mut Frame, pane: &AgentPane, zone: ratatui::layout::Rect) {
-    if zone.width < 20 || zone.height < 6 {
-        return;
-    }
-    let inner_w = zone.width.saturating_sub(4) as usize;
-    let columns = inner_w.saturating_sub(12).clamp(2, 72);
-    let mut out: Vec<Line> = Vec::new();
-    out.push(Line::from(Span::styled(
-        "agent trail — time runs left to right, now on the right",
-        Style::default().fg(Ed::dim()),
-    )));
-    out.push(Line::from(""));
-    for (lane, row) in crate::trail::rows(&pane.trail, columns) {
-        let glyphs: String = row.into_iter().collect();
-        out.push(Line::from(vec![
-            Span::styled(
-                format!("{:<9}", lane.id()),
-                Style::default().fg(Ed::gutter()),
-            ),
-            Span::styled(glyphs, Style::default().fg(Ed::cyan())),
-        ]));
-    }
-    // each lane has its own colour, so a command, an answer and a file read
-    // are told apart at a glance
-    for step in pane.trail.iter().rev() {
-        let colour = match step.lane {
-            crate::trail::Lane::Tool => Ed::cyan(),
-            crate::trail::Lane::Result => Ed::text(),
-            crate::trail::Lane::File => Ed::gutter(),
-            crate::trail::Lane::Say => Ed::dim(),
-        };
-        // a shell command reads as a terminal prompt, not as a plain label
-        let line = if step.label.starts_with("run_shell ") {
-            format!("$ {}", &step.label["run_shell ".len()..])
-        } else {
-            format!("{:>5.1}s {:<7} {}", step.at, step.lane.id(), step.label)
-        };
-        // a command is wrapped, not cut: the whole call stays readable
-        out.push(Line::from(Span::styled(line, Style::default().fg(colour))));
-    }
-    let rect = ratatui::layout::Rect {
-        x: zone.x + 2,
-        y: zone.y + 1,
-        width: zone.width.saturating_sub(4),
-        height: zone.height.saturating_sub(2),
-    };
-    frame.render_widget(Paragraph::new(out).wrap(Wrap { trim: false }), rect);
 }
 
 fn draw_agent(frame: &mut Frame, pane: &mut AgentPane, zone: ratatui::layout::Rect) {
@@ -6135,54 +6058,10 @@ mod float_tests {
         );
     }
 
-    /// on an ordinary terminal (80x24, 120x30) the trail must still be on
-    /// screen: a card that takes every row leaves the trail with nothing to
-    /// draw in, and the user sees no trail at all.
+    /// the agent menu is a centred card on a clean screen: no trail lane is
+    /// drawn under it, and the ide stays off the screen.
     #[test]
-    fn the_agent_trail_is_visible_on_an_ordinary_terminal() {
-        for (w, h) in [(80u16, 24u16), (120, 30)] {
-            let mut ed = Editor::open(None).unwrap();
-            let mut pane = AgentPane::new();
-            pane.trail.push(crate::trail::Step {
-                lane: crate::trail::Lane::Tool,
-                label: "read_file src/main.rs".into(),
-                at: 0.0,
-                ok: true,
-            });
-            ed.agent_pane = Some(pane);
-            let text = render_text(&mut ed, w, h);
-            assert!(text.contains("╭─ agent"), "the card is drawn at {w}x{h}");
-            assert!(
-                text.contains("read_file src/main.rs"),
-                "the trail is drawn at {w}x{h}:\n{text}"
-            );
-        }
-    }
-
-    /// the memory the agent uses is in the card's trail: a page it reads or
-    /// lists is a visible step, not something that happens unseen.
-    #[test]
-    fn the_memory_functions_the_agent_uses_are_in_the_trail() {
-        let mut ed = Editor::open(None).unwrap();
-        let mut pane = AgentPane::new();
-        pane.trail.push(crate::trail::Step {
-            lane: crate::trail::Lane::Tool,
-            label: "memory_read {\"class\":\"project\",\"name\":\"parser\"}".into(),
-            at: 0.0,
-            ok: true,
-        });
-        ed.agent_pane = Some(pane);
-        let text = render_text(&mut ed, 160, 40);
-        assert!(
-            text.contains("memory_read"),
-            "the memory read is drawn in the agent card:\n{text}"
-        );
-    }
-
-    /// the agent's trail is drawn under the card, and the ide stays off the
-    /// screen like it does for the card alone.
-    #[test]
-    fn the_agent_trail_is_drawn_under_a_clean_card() {
+    fn the_agent_menu_has_no_trail_under_its_card() {
         let mut ed = Editor::open(None).unwrap();
         ed.lines = (0..20)
             .map(|i| format!("SECRET_LINE_{i}_STAYS_VISIBLE"))
@@ -6210,12 +6089,12 @@ mod float_tests {
             "the ide is not drawn behind the card:\n{text}"
         );
         assert!(
-            text.contains("tool "),
-            "the trail lanes are still drawn:\n{text}"
+            !text.contains("tool "),
+            "no trail lane is drawn under the card:\n{text}"
         );
         assert!(
-            text.contains("read_file src/main.rs"),
-            "the actions are listed:\n{text}"
+            !text.contains("read_file src/main.rs"),
+            "the trail actions are not listed under the card:\n{text}"
         );
     }
 }
@@ -7166,8 +7045,8 @@ mod agent_view_tests {
         render_rows(ed, w, h)
     }
 
-    /// the agent's view is drawn above the trail band, so its own bottom
-    /// border is on screen: the trail used to paint over it.
+    /// the agent's view keeps its own bottom border on screen: nothing is
+    /// drawn over it now that the trail is gone.
     #[test]
     fn the_agent_view_keeps_its_bottom_border_above_the_trail() {
         let mut ed = Editor::open(None).unwrap();
@@ -7186,10 +7065,9 @@ mod agent_view_tests {
         ed.play_live();
         ed.play_live();
         let screen = rows(&mut ed, 120, 40);
-        let band_top = 40 - 12;
         assert!(
-            screen[band_top - 1].starts_with('╰'),
-            "the view has no bottom border above the trail:\n{}",
+            screen.iter().any(|r| r.starts_with('╰')),
+            "the view has no bottom border on screen:\n{}",
             screen.join("\n")
         );
     }
@@ -7927,118 +7805,50 @@ mod agent_colour_tests {
             "a keyword and a name of the code are not the same colour"
         );
     }
-
-    /// a shell command in the trail is not cut at the card's edge: the trail
-    /// shows the whole command on the row it belongs to, as the card does.
-    #[test]
-    fn a_long_command_is_not_cut_in_the_trail() {
-        let mut pane = AgentPane::new();
-        let cmd = "run_shell cargo test --workspace --all-targets -- --nocapture some_very_long_filter_name_here";
-        pane.trail.push(crate::trail::Step {
-            at: 0.0,
-            lane: crate::trail::Lane::Say,
-            label: cmd.into(),
-            ok: true,
-        });
-        let backend = ratatui::backend::TestBackend::new(70, 20);
-        let mut term = ratatui::Terminal::new(backend).unwrap();
-        term.draw(|f| {
-            draw_trail(f, &pane, ratatui::layout::Rect::new(0, 0, 70, 20));
-        })
-        .unwrap();
-        let buf = term.backend().buffer().clone();
-        let screen: String = (0..20u16)
-            .map(|y| (0..70u16).map(|x| buf[(x, y)].symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            screen.contains("some_very_long_filter_name_here"),
-            "the end of the command is on screen:\n{screen}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod trail_colour_tests {
-    use super::*;
-
-    /// a command, an answer and a file read are drawn in three different
-    /// colours in the trail, so the eye tells the kinds of action apart.
-    #[test]
-    fn each_lane_of_the_trail_has_its_own_colour() {
-        let mut pane = AgentPane::new();
-        for (lane, label) in [
-            (crate::trail::Lane::Tool, "run_shell cargo test"),
-            (crate::trail::Lane::Result, "run_shell: 307 passed"),
-            (crate::trail::Lane::File, "src/editor.rs"),
-        ] {
-            pane.trail.push(crate::trail::Step {
-                at: 0.0,
-                lane,
-                label: label.into(),
-                ok: true,
-            });
-        }
-        let backend = ratatui::backend::TestBackend::new(70, 20);
-        let mut term = ratatui::Terminal::new(backend).unwrap();
-        term.draw(|f| draw_trail(f, &pane, ratatui::layout::Rect::new(0, 0, 70, 20)))
-            .unwrap();
-        let buf = term.backend().buffer().clone();
-        let colour_of = |word: &str| {
-            let row = (0..20u16)
-                .find(|&y| {
-                    (0..70u16)
-                        .map(|x| buf[(x, y)].symbol())
-                        .collect::<String>()
-                        .contains(word)
-                })
-                .expect("the step is drawn");
-            let text: String = (0..70u16).map(|x| buf[(x, row)].symbol()).collect();
-            buf[(
-                text.find(word).map(|b| text[..b].chars().count()).unwrap() as u16,
-                row,
-            )]
-                .fg
-        };
-        let tool = colour_of("$ cargo test");
-        let result = colour_of("307 passed");
-        let file = colour_of("src/editor.rs");
-        assert_ne!(tool, result, "a command and its answer differ");
-        assert_ne!(tool, file, "a command and a file differ");
-        assert_ne!(result, file, "an answer and a file differ");
-    }
 }
 
 #[cfg(test)]
 mod terminal_look_tests {
     use super::*;
 
-    /// a shell command in the trail reads as a terminal prompt: a `$` in front
-    /// of it, so the eye knows it is a command the agent ran.
-    #[test]
-    fn a_command_in_the_trail_has_a_terminal_prompt() {
-        let mut pane = AgentPane::new();
-        pane.trail.push(crate::trail::Step {
-            at: 0.0,
-            lane: crate::trail::Lane::Tool,
-            label: "run_shell cargo test".into(),
-            ok: true,
-        });
-        let backend = ratatui::backend::TestBackend::new(70, 20);
-        let mut term = ratatui::Terminal::new(backend).unwrap();
-        term.draw(|f| draw_trail(f, &pane, ratatui::layout::Rect::new(0, 0, 70, 20)))
-            .unwrap();
-        let buf = term.backend().buffer().clone();
-        let screen: String = (0..20u16)
-            .map(|y| (0..70u16).map(|x| buf[(x, y)].symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(screen.contains("$ cargo test"), "a prompt:\n{screen}");
-    }
-
     /// when the agent runs a shell command, the live view turns into a
     /// terminal: the command appears with a `$` and its output under it, not
     /// as a json call in a generic action list.
+    #[test]
+    fn every_tool_action_is_played_as_a_terminal_line() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        let (tx, rx) = channel();
+        pane.rx = Some(rx);
+        tx.send(crate::agent::Event::ToolCall {
+            name: "list_dir".into(),
+            args: serde_json::json!({"path": "src"}),
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::ToolResult {
+            name: "list_dir".into(),
+            ok: true,
+            text: "editor.rs".into(),
+        })
+        .unwrap();
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        let mut guard = 0;
+        while !ed.live.is_empty() && guard < 10_000 {
+            ed.play_live();
+            guard += 1;
+        }
+        let shown = ed.agent_view.lines.join("\n");
+        assert!(
+            shown.contains("$ ls src"),
+            "a list_dir is not played as a terminal line:\n{shown}"
+        );
+        assert!(
+            !shown.contains("> list_dir"),
+            "the json call is still shown:\n{shown}"
+        );
+    }
+
     #[test]
     fn a_shell_command_is_played_as_a_terminal_session() {
         let mut ed = Editor::open(None).unwrap();
