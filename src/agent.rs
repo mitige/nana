@@ -306,6 +306,7 @@ impl Agent {
             step += 1;
             self.steps = step;
             shrink_old_tool_results(&mut self.messages, KEEP_WHOLE_RESULTS);
+            cap_context(&system, &mut self.messages, CONTEXT_CAP_CHARS);
             let reply: Reply = match self.client.chat(&system, &self.messages, &specs) {
                 Ok(r) => r,
                 Err(e) => {
@@ -428,6 +429,8 @@ const RECALL_BUDGET: usize = 6000;
 /// still sees what they were, and it can run the tool again to see the rest.
 const KEEP_WHOLE_RESULTS: usize = 4;
 const OLD_RESULT_HEAD: usize = 300;
+/// ceiling on the characters sent in one turn (system prompt included).
+const CONTEXT_CAP_CHARS: usize = 200_000;
 
 /// a long session re-sends every message on each turn. an old tool result
 /// (a file read, a grep) is the bulk of that, and it is stale by then: cut it
@@ -450,6 +453,49 @@ fn shrink_old_tool_results(msgs: &mut [Msg], keep_whole: usize) {
             "{head}\n[… {} characters elided from an older result; run the tool again to see them]",
             m.content.chars().count() - OLD_RESULT_HEAD
         );
+    }
+}
+
+/// what one turn actually sends: the system prompt and every message. the
+/// cap is measured on this, not on the messages alone, or the prompt grows
+/// past the budget unseen.
+fn context_chars(system: &str, msgs: &[Msg]) -> usize {
+    system.chars().count()
+        + msgs
+            .iter()
+            .map(|m| m.content.chars().count())
+            .sum::<usize>()
+}
+
+/// a hard ceiling on the context of one turn. when the sum is over it, the
+/// oldest tool results are cut to their head first, one after the other,
+/// until the sum fits. the user messages are never cut, and the newest result
+/// is the last one touched.
+fn cap_context(system: &str, msgs: &mut [Msg], cap: usize) {
+    let mut over = context_chars(system, msgs).saturating_sub(cap);
+    if over == 0 {
+        return;
+    }
+    let tools: Vec<usize> = msgs
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == Role::Tool)
+        .map(|(i, _)| i)
+        .collect();
+    for i in tools {
+        if over == 0 {
+            break;
+        }
+        let len = msgs[i].content.chars().count();
+        if len <= OLD_RESULT_HEAD {
+            continue;
+        }
+        let head: String = msgs[i].content.chars().take(OLD_RESULT_HEAD).collect();
+        let cut = len - OLD_RESULT_HEAD;
+        msgs[i].content = format!(
+            "{head}\n[... {cut} characters elided to keep the context under its cap; run the tool again to see them]"
+        );
+        over = over.saturating_sub(cut);
     }
 }
 
@@ -715,6 +761,32 @@ mod tests {
         );
         assert_eq!(msgs[5].content.len(), 20_000, "the last two stay whole");
         assert_eq!(msgs[6].content.len(), 20_000, "the last two stay whole");
+    }
+
+    #[test]
+    fn the_context_sent_each_turn_stays_under_the_cap() {
+        let big = "x".repeat(100_000);
+        let mut msgs = vec![Msg::user("q")];
+        for i in 0..6 {
+            msgs.push(Msg::tool(&format!("c{i}"), big.clone()));
+        }
+        let system = "s".repeat(1_000);
+        assert!(
+            context_chars(&system, &msgs) > CONTEXT_CAP_CHARS,
+            "the fixture really is over the cap"
+        );
+        cap_context(&system, &mut msgs, CONTEXT_CAP_CHARS);
+        let sent = context_chars(&system, &msgs);
+        assert!(
+            sent <= CONTEXT_CAP_CHARS,
+            "the context sent is {sent} chars, over the cap of {CONTEXT_CAP_CHARS}"
+        );
+        assert_eq!(msgs[0].content, "q", "the question is never cut");
+        assert_eq!(
+            msgs[6].content.len(),
+            100_000,
+            "the newest result is the last to be cut"
+        );
     }
 
     #[test]

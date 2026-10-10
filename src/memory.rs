@@ -640,6 +640,41 @@ impl Memory {
     }
 }
 
+/// decides, without asking, when the memory is worth a consolidation: when it
+/// holds pages that say the same thing, and only once per state of the memory.
+/// the fingerprint is what the trigger remembers, so an unchanged memory never
+/// costs a second model call, and any write re-arms it.
+#[derive(Debug, Default)]
+pub struct ConsolidationTrigger {
+    last_done: Option<u64>,
+}
+
+impl ConsolidationTrigger {
+    pub fn due(&self, m: &Memory) -> bool {
+        let fp = fingerprint(m);
+        self.last_done != Some(fp) && !m.audit().duplicates.is_empty()
+    }
+
+    pub fn done(&mut self, m: &Memory) {
+        self.last_done = Some(fingerprint(m));
+    }
+}
+
+/// a hash of the page names and bodies: any change to the memory changes it.
+fn fingerprint(m: &Memory) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    for e in m.list() {
+        e.class.id().hash(&mut h);
+        e.name.hash(&mut h);
+        std::fs::read_to_string(&e.path)
+            .unwrap_or_default()
+            .hash(&mut h);
+    }
+    h.finish()
+}
+
 /// what `tidy` removed, as `class/name`. the copies stay readable in the history.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Tidy {
@@ -1349,6 +1384,34 @@ mod tests {
         );
         let h = m.history(Class::Project, "a");
         assert_eq!(h.len(), 2, "the write and the removal are both kept: {h:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn consolidation_is_due_on_overlap_and_not_again_on_the_same_memory() {
+        let d = tmp("due");
+        let m = Memory::open(&d);
+        m.write(Class::Project, "a", "# a\n\nthe same words here")
+            .unwrap();
+        m.write(Class::Project, "b", "# b\n\nthe same words here")
+            .unwrap();
+        let mut trig = ConsolidationTrigger::default();
+        assert!(trig.due(&m), "overlapping pages make consolidation due");
+        trig.done(&m);
+        assert!(!trig.due(&m), "the same memory is not asked again");
+        m.write(Class::Project, "c", "# c\n\nthe same words here")
+            .unwrap();
+        assert!(trig.due(&m), "a changed memory re-arms the trigger");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_memory_without_overlap_is_not_consolidated() {
+        let d = tmp("nodue");
+        let m = Memory::open(&d);
+        m.write(Class::Project, "a", "# a\n\nalpha beta").unwrap();
+        m.write(Class::Project, "b", "# b\n\ngamma delta").unwrap();
+        assert!(!ConsolidationTrigger::default().due(&m));
         let _ = std::fs::remove_dir_all(&d);
     }
 

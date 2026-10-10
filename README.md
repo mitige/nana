@@ -2,7 +2,7 @@
 
 an adaptive terminal editor. one buffer, every language.
 
-version 2.0.
+version 2.1.0.
 
 ![nana, the welcome screen](docs/shots/test1.png)
 
@@ -215,6 +215,14 @@ memory is **scoped by construction**: an agent opened in one project cannot
 read or write another project's memory. that is what keeps it useful instead
 of bloated. the prompt carries only the index — names, not contents — and the
 agent reads a page when it becomes relevant.
+
+the memory keeps itself, on its own. when a request names a project or
+reference page, its `check` runs before the answer, so a stale claim is
+caught before it is trusted. when you stop typing for a while, nana audits
+the store in the background and reports duplicate and stale pages. with an
+ai client, it also consolidates: near-copies become one summary, and the pages
+it replaces move to the history, never lost. user pages are never retired.
+the silence is measured from your own typing rhythm, not a fixed timer.
 
 ![the hub, boxes with rounded edges](docs/shots/test5.png)
 

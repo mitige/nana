@@ -18,7 +18,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 use std::collections::HashMap;
@@ -508,7 +508,7 @@ impl AgentPane {
                     // did not announce a file shows its call and its answer
                     if let Some((call, args, shown)) = self.pending.take() {
                         if call == name && !shown {
-                            let mut text_lines = vec![format!("> {name} {}", short_json(&args))];
+                            let mut text_lines = vec![terminal_header(&name, &args)];
                             text_lines.extend(text.trim().lines().map(safe_text));
                             self.writes.push(LiveWrite {
                                 path: PathBuf::from(ACTIONS_VIEW),
@@ -574,6 +574,18 @@ fn short_json(v: &serde_json::Value) -> String {
     } else {
         s.chars().take(70).collect::<String>() + "…"
     }
+}
+
+/// the line that opens an action in the live view. a shell command reads as a
+/// terminal prompt, `$ ls`, so the eye knows the agent ran it; any other tool
+/// keeps its name and its json arguments.
+fn terminal_header(name: &str, args: &serde_json::Value) -> String {
+    if name == "run_shell" {
+        if let Some(command) = args.get("command").and_then(|c| c.as_str()) {
+            return format!("$ {}", command.replace('\n', " "));
+        }
+    }
+    format!("> {name} {}", short_json(args))
 }
 
 /// what a cell is allowed to show. text from the agent or from a file can carry
@@ -682,6 +694,39 @@ fn ticks_for(waited: Duration) -> usize {
     (waited.as_millis() / TICK.as_millis()).max(1) as usize
 }
 
+/// the most ticks the playback may owe the agent: about a second and a half at
+/// 60 fps. past it, the waiting writes are shortened so the screen catches up
+/// with the agent instead of showing what it did a minute ago.
+const LAG_BUDGET: usize = 94;
+/// the most writes that may wait behind the one on screen. beyond it the oldest
+/// land at once: a flood must not turn into a queue the user watches for minutes.
+const MAX_QUEUE: usize = 24;
+
+/// keeps the playback in step with the agent. the text of every write still
+/// lands in full; only the time it takes shrinks. writes without a duration
+/// (ticks 0, one letter per tick) are left as they were.
+fn catch_up(live: &mut [LiveWrite]) {
+    let n = live.len();
+    if n > MAX_QUEUE {
+        for w in live[..n - MAX_QUEUE].iter_mut().filter(|w| w.ticks > 0) {
+            w.ticks = w.ticks.min(w.elapsed + 1);
+        }
+    }
+    let owed: usize = live
+        .iter()
+        .filter(|w| w.ticks > 0)
+        .map(|w| w.ticks.saturating_sub(w.elapsed))
+        .sum();
+    if owed <= LAG_BUDGET {
+        return;
+    }
+    for w in live.iter_mut().filter(|w| w.ticks > 0) {
+        let left = w.ticks.saturating_sub(w.elapsed);
+        let fit = (left * LAG_BUDGET / owed).max(1);
+        w.ticks = w.elapsed + fit;
+    }
+}
+
 /// Niveau d'une notification toast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Level {
@@ -768,6 +813,9 @@ pub struct Editor {
     confirm_delete: Option<PathBuf>,
     /// génération d'en-tête en cours (description par le modèle)
     header_rx: Option<Receiver<Result<String, String>>>,
+    /// consolidation de la mémoire en arrière-plan, et son déclencheur adaptatif
+    consolidation: crate::memory::ConsolidationTrigger,
+    consolidation_rx: Option<Receiver<Result<usize, String>>>,
     /// terminal intégré (F3), ouvert = visible
     term: Option<TermPane>,
     /// branche git du projet (barre haute)
@@ -923,6 +971,8 @@ impl Editor {
             toasts: Vec::new(),
             confirm_delete: None,
             header_rx: None,
+            consolidation: crate::memory::ConsolidationTrigger::default(),
+            consolidation_rx: None,
             term: None,
             git_branch: detect_git_branch(file_dir(path)),
             project_label: None,
@@ -1438,6 +1488,7 @@ impl Editor {
         if let Some(pane) = &mut self.agent_pane {
             pane.poll();
             self.live.extend(pane.writes.drain(..));
+            catch_up(&mut self.live);
         }
         if let Some(hub) = &mut self.hub {
             hub.poll();
@@ -1924,7 +1975,28 @@ impl Editor {
         else {
             return;
         };
-        let a = crate::memory::Memory::open(&root).audit();
+        let m = crate::memory::Memory::open(&root);
+        if self.consolidation_rx.is_none() && self.consolidation.due(&m) {
+            if let Some(client) = self.ai.clone() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let mem = crate::memory::Memory::open(&root);
+                std::thread::spawn(move || {
+                    let res = crate::memory::consolidate(&mem, |prompt| {
+                        client
+                            .chat(
+                                "you consolidate a project memory. answer with the json plan only.",
+                                prompt,
+                            )
+                            .map_err(|e| e.to_string())
+                    });
+                    let _ = tx.send(res.map(|retired| retired.len()));
+                });
+                self.consolidation_rx = Some(rx);
+                self.status = "memory: consolidating in the background...".into();
+                return;
+            }
+        }
+        let a = m.audit();
         if a.duplicates.is_empty() && a.stale.is_empty() {
             return;
         }
@@ -1933,6 +2005,29 @@ impl Editor {
             a.duplicates.len(),
             a.stale.len()
         );
+    }
+
+    /// reads the consolidation thread: when it ends, the trigger is marked done
+    /// for the memory as it now stands, so the model is not asked again for it.
+    fn poll_consolidation(&mut self) {
+        let Some(rx) = &self.consolidation_rx else {
+            return;
+        };
+        let Ok(res) = rx.try_recv() else {
+            return;
+        };
+        self.consolidation_rx = None;
+        if let Some(root) =
+            crate::project::detect(self.file.as_deref().unwrap_or(Path::new("."))).map(|p| p.root)
+        {
+            let m = crate::memory::Memory::open(&root);
+            self.consolidation.done(&m);
+            self.status = match res {
+                Ok(0) => "memory: nothing to consolidate".into(),
+                Ok(n) => format!("memory: consolidated, {n} summary(ies)"),
+                Err(e) => format!("memory: consolidation failed: {e}"),
+            };
+        }
     }
 
     fn poll_header(&mut self) {
@@ -3805,6 +3900,15 @@ fn draw_agent_view(
     let inner = draw_box(frame, zone, &[(title, Ed::cyan())], Ed::cyan());
     let h = inner.height as usize;
     let start = view.cy.saturating_sub(h.saturating_sub(1));
+    let ext = if path == Path::new(ACTIONS_VIEW) {
+        ""
+    } else {
+        crate::langs::for_path(path)
+            .exts
+            .first()
+            .copied()
+            .unwrap_or("")
+    };
     let lines: Vec<Line> = view
         .lines
         .iter()
@@ -3815,16 +3919,17 @@ fn draw_agent_view(
             // the current line is marked only while the agent is writing:
             // an idle view shows its file, not a place where nothing happens
             let cur = playing && i == view.cy;
-            Line::from(vec![
-                Span::styled(
-                    format!("{:>4} ", i + 1),
-                    Style::default().fg(if cur { Ed::text() } else { Ed::gutter() }),
-                ),
-                Span::styled(
-                    clip(text, inner.width.saturating_sub(5) as usize),
-                    Style::default().fg(Ed::text()),
-                ),
-            ])
+            let mut spans = vec![Span::styled(
+                format!("{:>4} ", i + 1),
+                Style::default().fg(if cur { Ed::text() } else { Ed::gutter() }),
+            )];
+            // the file's own language colours the code, as the editor does
+            spans.extend(render_line(
+                &clip(text, inner.width.saturating_sub(5) as usize),
+                Ed::text(),
+                ext,
+            ));
+            Line::from(spans)
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
@@ -3901,11 +4006,23 @@ fn draw_trail(frame: &mut Frame, pane: &AgentPane, zone: ratatui::layout::Rect) 
             Span::styled(glyphs, Style::default().fg(Ed::cyan())),
         ]));
     }
-    for line in crate::trail::lines(&pane.trail).into_iter().rev() {
-        out.push(Line::from(Span::styled(
-            clip(&line, inner_w),
-            Style::default().fg(Ed::dim()),
-        )));
+    // each lane has its own colour, so a command, an answer and a file read
+    // are told apart at a glance
+    for step in pane.trail.iter().rev() {
+        let colour = match step.lane {
+            crate::trail::Lane::Tool => Ed::cyan(),
+            crate::trail::Lane::Result => Ed::text(),
+            crate::trail::Lane::File => Ed::gutter(),
+            crate::trail::Lane::Say => Ed::dim(),
+        };
+        // a shell command reads as a terminal prompt, not as a plain label
+        let line = if step.label.starts_with("run_shell ") {
+            format!("$ {}", &step.label["run_shell ".len()..])
+        } else {
+            format!("{:>5.1}s {:<7} {}", step.at, step.lane.id(), step.label)
+        };
+        // a command is wrapped, not cut: the whole call stays readable
+        out.push(Line::from(Span::styled(line, Style::default().fg(colour))));
     }
     let rect = ratatui::layout::Rect {
         x: zone.x + 2,
@@ -3913,7 +4030,7 @@ fn draw_trail(frame: &mut Frame, pane: &AgentPane, zone: ratatui::layout::Rect) 
         width: zone.width.saturating_sub(4),
         height: zone.height.saturating_sub(2),
     };
-    frame.render_widget(Paragraph::new(out), rect);
+    frame.render_widget(Paragraph::new(out).wrap(Wrap { trim: false }), rect);
 }
 
 fn draw_agent(frame: &mut Frame, pane: &mut AgentPane, zone: ratatui::layout::Rect) {
@@ -4842,6 +4959,7 @@ fn loop_run(terminal: &mut ratatui::DefaultTerminal, ed: &mut Editor) -> io::Res
         ed.poll_check();
         ed.poll_diag();
         ed.poll_header();
+        ed.poll_consolidation();
         ed.poll_quiet(Instant::now());
         if let Some(term) = &mut ed.term {
             term.poll();
@@ -5678,6 +5796,42 @@ mod hub_ui_tests {
         let mut ed = Editor::open(None).unwrap();
         ed.explorer = Some(Explorer::new(root.to_path_buf()));
         ed
+    }
+
+    #[test]
+    fn a_quiet_moment_consolidates_twin_pages_only_when_a_model_can_answer() {
+        let d = seeded();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+        let m = crate::memory::Memory::open(&d);
+        m.write(
+            crate::memory::Class::Project,
+            "twin-a",
+            "# a\n\nsame words here",
+        )
+        .unwrap();
+        m.write(
+            crate::memory::Class::Project,
+            "twin-b",
+            "# b\n\nsame words here",
+        )
+        .unwrap();
+        let mut ed = editor_at(&d);
+        ed.file = Some(d.join("main.rs"));
+        let t0 = Instant::now();
+        for i in 0..5 {
+            ed.quiet.key(t0 + Duration::from_millis(200 * i));
+        }
+        let quiet_end = t0 + Duration::from_millis(800) + ed.quiet.threshold();
+        ed.poll_quiet(quiet_end);
+        assert!(
+            ed.consolidation_rx.is_none(),
+            "no model, no consolidation thread"
+        );
+        assert!(
+            ed.consolidation.due(&m),
+            "the trigger stays armed until a model answers"
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -7393,6 +7547,93 @@ mod agent_view_tests {
 }
 
 #[cfg(test)]
+mod live_sync_tests {
+    use super::*;
+
+    fn write_of(path: &str, text: Vec<String>, ticks: usize) -> LiveWrite {
+        LiveWrite {
+            path: PathBuf::from(path),
+            text,
+            shown: 0,
+            col: 0,
+            ticks,
+            elapsed: 0,
+            write: true,
+        }
+    }
+
+    /// the playback must not trail the agent: four long writes queued at once
+    /// are compressed so their whole backlog fits in the lag budget (94 ticks).
+    #[test]
+    fn the_playback_never_trails_the_agent_by_more_than_its_lag_budget() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        for _ in 0..4 {
+            pane.writes
+                .push(write_of("src/lib.rs", vec!["x".repeat(400)], 2000));
+        }
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        let backlog: usize = ed
+            .live
+            .iter()
+            .map(|w| w.ticks.saturating_sub(w.elapsed))
+            .sum();
+        assert!(backlog <= 94, "the playback trails by {backlog} ticks");
+        assert_eq!(ed.live.len(), 4, "no write is dropped, only compressed");
+    }
+
+    /// a flood of writes, each at the agent's own pace, is caught up: the whole
+    /// backlog plays within the lag budget, and the screen ends on the last
+    /// thing the agent did.
+    #[test]
+    fn a_flood_of_writes_is_caught_up_and_the_screen_ends_on_the_last_one() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        for i in 0..40 {
+            pane.writes.push(write_of(
+                &format!("f{i}.rs"),
+                vec![format!("fn f{i}() {{}}")],
+                16,
+            ));
+        }
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        let mut frames = 0;
+        while !ed.live.is_empty() && frames < 100_000 {
+            ed.play_live();
+            frames += 1;
+        }
+        assert!(frames <= 94, "the flood took {frames} frames to show");
+        assert_eq!(
+            ed.agent_view.lines,
+            vec!["fn f39() {}".to_string()],
+            "the view shows the last write"
+        );
+    }
+
+    /// a compressed write still lands in full: the lag rule shortens the
+    /// playback, it never cuts the text the agent wrote.
+    #[test]
+    fn a_compressed_write_still_lands_in_full() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.writes
+            .push(write_of("a.rs", vec!["alpha".into(), "beta".into()], 900));
+        pane.writes
+            .push(write_of("b.rs", vec!["gamma".repeat(60)], 900));
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        let mut guard = 0;
+        while !ed.live.is_empty() && guard < 100_000 {
+            ed.play_live();
+            guard += 1;
+        }
+        assert_eq!(ed.agent_view.lines, vec!["gamma".repeat(60)]);
+    }
+}
+
+#[cfg(test)]
 mod glitch_safety_tests {
     use super::*;
 
@@ -7633,5 +7874,207 @@ mod agent_input_tests {
         let row_of = |w: &str| rows.iter().position(|r| r.contains(w)).unwrap();
         assert!(row_of("one") < row_of("two"), "lines keep their order");
         assert!(row_of("two") < row_of("three"), "lines keep their order");
+    }
+}
+
+#[cfg(test)]
+mod agent_colour_tests {
+    use super::*;
+
+    /// the agent's live view colours code the way the editor does: a keyword
+    /// of the file's language is not drawn in the same colour as a plain name.
+    #[test]
+    fn the_live_view_colours_code_by_its_language() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: PathBuf::from("src/lib.rs"),
+            text: vec!["fn main() {".into()],
+            shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
+            write: true,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        while !ed.live.is_empty() {
+            ed.play_live();
+        }
+        std::thread::sleep(VIEW_SWEEP);
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, &mut ed)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let row = (0..40u16)
+            .find(|&y| {
+                (0..120u16)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("fn main")
+            })
+            .expect("the line is drawn");
+        let x_of = |word: &str| {
+            let text: String = (0..120u16).map(|x| buf[(x, row)].symbol()).collect();
+            text.find(word)
+                .map(|b| text[..b].chars().count() as u16)
+                .unwrap()
+        };
+        let keyword = buf[(x_of("fn"), row)].fg;
+        let name = buf[(x_of("main"), row)].fg;
+        assert_ne!(
+            keyword, name,
+            "a keyword and a name of the code are not the same colour"
+        );
+    }
+
+    /// a shell command in the trail is not cut at the card's edge: the trail
+    /// shows the whole command on the row it belongs to, as the card does.
+    #[test]
+    fn a_long_command_is_not_cut_in_the_trail() {
+        let mut pane = AgentPane::new();
+        let cmd = "run_shell cargo test --workspace --all-targets -- --nocapture some_very_long_filter_name_here";
+        pane.trail.push(crate::trail::Step {
+            at: 0.0,
+            lane: crate::trail::Lane::Say,
+            label: cmd.into(),
+            ok: true,
+        });
+        let backend = ratatui::backend::TestBackend::new(70, 20);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            draw_trail(f, &pane, ratatui::layout::Rect::new(0, 0, 70, 20));
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        let screen: String = (0..20u16)
+            .map(|y| (0..70u16).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("some_very_long_filter_name_here"),
+            "the end of the command is on screen:\n{screen}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod trail_colour_tests {
+    use super::*;
+
+    /// a command, an answer and a file read are drawn in three different
+    /// colours in the trail, so the eye tells the kinds of action apart.
+    #[test]
+    fn each_lane_of_the_trail_has_its_own_colour() {
+        let mut pane = AgentPane::new();
+        for (lane, label) in [
+            (crate::trail::Lane::Tool, "run_shell cargo test"),
+            (crate::trail::Lane::Result, "run_shell: 307 passed"),
+            (crate::trail::Lane::File, "src/editor.rs"),
+        ] {
+            pane.trail.push(crate::trail::Step {
+                at: 0.0,
+                lane,
+                label: label.into(),
+                ok: true,
+            });
+        }
+        let backend = ratatui::backend::TestBackend::new(70, 20);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw_trail(f, &pane, ratatui::layout::Rect::new(0, 0, 70, 20)))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        let colour_of = |word: &str| {
+            let row = (0..20u16)
+                .find(|&y| {
+                    (0..70u16)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains(word)
+                })
+                .expect("the step is drawn");
+            let text: String = (0..70u16).map(|x| buf[(x, row)].symbol()).collect();
+            buf[(
+                text.find(word).map(|b| text[..b].chars().count()).unwrap() as u16,
+                row,
+            )]
+                .fg
+        };
+        let tool = colour_of("$ cargo test");
+        let result = colour_of("307 passed");
+        let file = colour_of("src/editor.rs");
+        assert_ne!(tool, result, "a command and its answer differ");
+        assert_ne!(tool, file, "a command and a file differ");
+        assert_ne!(result, file, "an answer and a file differ");
+    }
+}
+
+#[cfg(test)]
+mod terminal_look_tests {
+    use super::*;
+
+    /// a shell command in the trail reads as a terminal prompt: a `$` in front
+    /// of it, so the eye knows it is a command the agent ran.
+    #[test]
+    fn a_command_in_the_trail_has_a_terminal_prompt() {
+        let mut pane = AgentPane::new();
+        pane.trail.push(crate::trail::Step {
+            at: 0.0,
+            lane: crate::trail::Lane::Tool,
+            label: "run_shell cargo test".into(),
+            ok: true,
+        });
+        let backend = ratatui::backend::TestBackend::new(70, 20);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw_trail(f, &pane, ratatui::layout::Rect::new(0, 0, 70, 20)))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        let screen: String = (0..20u16)
+            .map(|y| (0..70u16).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("$ cargo test"), "a prompt:\n{screen}");
+    }
+
+    /// when the agent runs a shell command, the live view turns into a
+    /// terminal: the command appears with a `$` and its output under it, not
+    /// as a json call in a generic action list.
+    #[test]
+    fn a_shell_command_is_played_as_a_terminal_session() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        let (tx, rx) = channel();
+        pane.rx = Some(rx);
+        tx.send(crate::agent::Event::ToolCall {
+            name: "run_shell".into(),
+            args: serde_json::json!({"command": "ls"}),
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::ToolResult {
+            name: "run_shell".into(),
+            ok: true,
+            text: "Cargo.toml\nsrc".into(),
+        })
+        .unwrap();
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        let mut guard = 0;
+        while !ed.live.is_empty() && guard < 10_000 {
+            ed.play_live();
+            guard += 1;
+        }
+        let shown = ed.agent_view.lines.join("\n");
+        assert!(
+            shown.contains("$ ls"),
+            "the command has no prompt:\n{shown}"
+        );
+        assert!(
+            shown.contains("Cargo.toml"),
+            "the output is not shown:\n{shown}"
+        );
+        assert!(
+            !shown.contains("> run_shell"),
+            "the json call is still shown:\n{shown}"
+        );
     }
 }
