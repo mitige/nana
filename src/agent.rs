@@ -166,14 +166,23 @@ impl Agent {
                 text: format!("skill « {} » — follow it:\n{}", s.name, s.body),
             });
         }
+        // always present: an agent that never hears about memory never writes any
         let mem = self.ctx.memory.index();
-        if !mem.is_empty() {
-            out.push(Section {
-                order: 400,
-                name: "memory",
-                text: format!("{mem}read a page with the memory_read tool when it matters."),
-            });
-        }
+        let known = if mem.is_empty() {
+            "the memory of this project is empty so far.\n".to_string()
+        } else {
+            mem
+        };
+        out.push(Section {
+            order: 400,
+            name: "memory",
+            text: format!(
+                "{known}read a page with the memory_read tool when it matters. \
+                 write one with memory_write as soon as you learn something durable: \
+                 a convention, a decision, a fact about the user, a pitfall you hit. \
+                 check memory before you start a task, and record what you learned at the end."
+            ),
+        });
         let wiki = crate::knowledge::index(&self.root);
         if !wiki.is_empty() {
             out.push(Section {
@@ -190,6 +199,16 @@ impl Agent {
             name: "tools",
             text: "tools: files and the shell are scoped to this project. a destructive \
                    command is refused unless the user approved it — never try to work around that."
+                .into(),
+        });
+        // the model stops early when it is unsure it may go on; say plainly that it may
+        out.push(Section {
+            order: 1100,
+            name: "autonomy",
+            text: "work in one unbroken run until the task is finished. do not stop to ask \
+                   whether to continue, do not ask permission between steps, and do not end \
+                   your turn with a plan. act, check the result with a tool, and keep going. \
+                   only answer in words when the task is done or when you are truly blocked."
                 .into(),
         });
         out.push(Section {
@@ -433,6 +452,37 @@ mod tests {
         let mut s = Settings::default();
         s.sandbox = Some(true);
         Agent::with_client(root, s, Client::local(url, "mock"))
+    }
+
+    #[test]
+    fn the_prompt_asks_for_one_unbroken_run() {
+        let d = tmp("autonomy");
+        let a = Agent::with_client(
+            &d,
+            Settings::default(),
+            Client::local("http://127.0.0.1:1", "m"),
+        );
+        let p = a.system_prompt("refactor the parser");
+        assert!(p.contains("one unbroken run"), "no autonomy nudge: {p}");
+        assert!(
+            p.contains("do not stop to ask"),
+            "the agent must not ask permission between steps: {p}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_empty_memory_still_asks_the_agent_to_remember() {
+        let d = tmp("memory-empty");
+        let a = Agent::with_client(
+            &d,
+            Settings::default(),
+            Client::local("http://127.0.0.1:1", "m"),
+        );
+        let p = a.system_prompt("refactor the parser");
+        assert!(p.contains("memory_write"), "no write nudge: {p}");
+        assert!(p.contains("memory_read"), "no read nudge: {p}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

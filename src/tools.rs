@@ -99,7 +99,10 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "memory_list".into(),
-            description: "list the memory pages of this project.".into(),
+            description:
+                "list the memory pages of this project. call it first on any non-trivial task: \
+                          the past work of this project is written here."
+                    .into(),
             parameters: obj(json!({}), json!([])),
         },
         ToolSpec {
@@ -117,9 +120,10 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "memory_write".into(),
-            description:
-                "write a memory page of this project. use it for durable facts, not for chatter."
-                    .into(),
+            description: "write a memory page of this project. write whenever you learn something \
+                          durable (a convention, a decision, a pitfall, a fact about the user); \
+                          not for chatter."
+                .into(),
             parameters: obj(
                 json!({
                     "class": {"type": "string"},

@@ -2896,11 +2896,20 @@ fn draw(frame: &mut Frame, ed: &mut Editor) {
         draw_diagnostics(frame, ed, editor_area);
     }
     // floats par-dessus tout : recherche, puis toasts
+    // the search and the agent menu are windows of their own, like the hub:
+    // nothing of the ide is drawn around them, so the card floats on a clean
+    // screen
     if let Some(fs) = &mut ed.search {
-        draw_search(frame, fs, chunks[2], ed.focus == Focus::Search);
+        clear_area(frame, area);
+        draw_search(frame, fs, area, ed.focus == Focus::Search);
+        draw_toasts(frame, ed, area);
+        return;
     }
     if let Some(pane) = &mut ed.agent_pane {
-        draw_agent(frame, pane, chunks[2]);
+        clear_area(frame, area);
+        draw_agent(frame, pane, area);
+        draw_toasts(frame, ed, area);
+        return;
     }
     if let Some(hub) = &mut ed.hub {
         draw_hub(frame, hub, chunks[2]);
@@ -3211,21 +3220,24 @@ fn draw_hub(frame: &mut Frame, hub: &mut crate::hub::Hub, zone: ratatui::layout:
     let cursor = hub.cursor().min(hub.items().len().saturating_sub(1));
     for (i, item) in hub.items().iter().enumerate() {
         let selected = i == cursor;
+        // the row is cut to the card, with a sign: a name that runs into the
+        // border reads as broken, and a cut with no ellipsis reads as a bug
+        let room = inner.width.saturating_sub(3) as usize;
+        let label = clip(&format!(" {}", item.label), room);
         let mut spans = vec![
             Span::styled(
                 if selected { "▎" } else { " " },
                 Style::default().fg(Ed::accent()),
             ),
             Span::styled(
-                format!(" {}", item.label),
+                label.clone(),
                 Style::default().fg(if selected { Ed::text() } else { Ed::dim() }),
             ),
         ];
         if !item.note.is_empty() && !selected {
-            spans.push(Span::styled(
-                format!("  {}", item.note),
-                Style::default().fg(Ed::gutter()),
-            ));
+            let used = UnicodeWidthStr::width(label.as_str()) + 1;
+            let note = clip(&format!("  {}", item.note), room.saturating_sub(used));
+            spans.push(Span::styled(note, Style::default().fg(Ed::gutter())));
         }
         lines.push(Line::from(spans));
     }
@@ -3370,6 +3382,29 @@ fn draw_agent(frame: &mut Frame, pane: &mut AgentPane, zone: ratatui::layout::Re
             ..inner
         },
     );
+}
+
+/// Cut `text` to `width` columns. A cut row ends in « … » so the reader sees
+/// that something was there; text that fits is returned untouched.
+fn clip(text: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w + 1 > width {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 /// Wrap a paragraph to `width` columns, on words.
@@ -4861,32 +4896,28 @@ mod rounded_everywhere_tests {
 mod sober_badge_tests {
     use super::*;
 
-    /// the badge colour of a focused modal, read from the drawn screen: the search
-    /// carries the single focus accent, not a second colour. the hub has no status
-    /// bar at all (it is the whole screen), so it is not checked here.
+    /// the search is a window of its own, so it draws no status bar and no
+    /// badge: the focus accent lives on its border, never a magenta second colour.
     #[test]
-    fn search_badge_is_not_magenta() {
+    fn search_window_has_no_magenta_badge() {
         let mut ed = Editor::open(None).unwrap();
         ed.focus = Focus::Search;
         ed.search = Some(FileSearch::new(std::path::PathBuf::from(".")));
-        let fg = badge_fg(&mut ed, "search");
-        assert_ne!(fg, Color::Indexed(5), "search badge is magenta");
-    }
-
-    /// colour of the left status-bar pill, read at the cell that holds its label.
-    fn badge_fg(ed: &mut Editor, label: &str) -> Color {
         let backend = ratatui::backend::TestBackend::new(110, 30);
         let mut term = ratatui::Terminal::new(backend).unwrap();
-        term.draw(|f| draw(f, ed)).unwrap();
+        term.draw(|f| draw(f, &mut ed)).unwrap();
         let buf = term.backend().buffer();
-        let first = label.chars().next().unwrap().to_string();
-        for x in 0..110u16 {
-            let cell = &buf[(x, 29)];
-            if cell.symbol() == first && buf[(x + 1, 29)].symbol() == &label[1..2] {
-                return cell.fg;
-            }
-        }
-        panic!("label {label} not found on the status bar");
+        let bottom: String = (0..110u16)
+            .map(|x| buf[(x, 29)].symbol().to_string())
+            .collect();
+        assert!(
+            !bottom.contains("search"),
+            "a status bar is drawn under the search: {bottom}"
+        );
+        let magenta = (0..30u16)
+            .flat_map(|y| (0..110u16).map(move |x| (x, y)))
+            .any(|(x, y)| buf[(x, y)].fg == Color::Indexed(5));
+        assert!(!magenta, "the search window has a magenta cell");
     }
 }
 
@@ -5227,8 +5258,50 @@ mod float_tests {
             !card.contains("SECRET_LINE"),
             "the editor shows through the card:\n{card}"
         );
-        // and the editor is still drawn elsewhere: a card, not a blank screen
-        assert!(text.contains("SECRET_LINE"), "the editor disappeared");
+        // the menu is a window of its own: the ide is not drawn around it either
+        assert!(
+            !text.contains("SECRET_LINE"),
+            "the ide is drawn around the card:\n{text}"
+        );
+    }
+
+    /// the search is a window on its own too: the editor behind it must not
+    /// show anywhere on the screen, the same as the agent menu and the hub.
+    #[test]
+    fn the_search_shows_nothing_of_the_ide_around_it() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.lines = (0..20)
+            .map(|i| format!("SECRET_LINE_{i}_SHOULD_NOT_SHOW_THROUGH"))
+            .collect();
+        ed.file = Some(std::path::PathBuf::from("x.py"));
+        ed.ext = "py".into();
+        ed.focus = Focus::Search;
+        ed.search = Some(FileSearch::new(std::path::PathBuf::from(".")));
+        let text = render_text(&mut ed, 100, 30);
+        assert!(text.contains("search"), "the search is drawn");
+        assert!(
+            !text.contains("SECRET_LINE"),
+            "the ide shows around the search:\n{text}"
+        );
+    }
+
+    /// the agent menu is a window on its own, like the hub: the editor behind
+    /// it must not show anywhere on the screen, not just under the card.
+    #[test]
+    fn the_agent_menu_shows_nothing_of_the_ide_around_it() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.lines = (0..20)
+            .map(|i| format!("SECRET_LINE_{i}_SHOULD_NOT_SHOW_THROUGH"))
+            .collect();
+        ed.file = Some(std::path::PathBuf::from("x.py"));
+        ed.ext = "py".into();
+        ed.agent_pane = Some(AgentPane::new());
+        let text = render_text(&mut ed, 100, 30);
+        assert!(text.contains("╭─ agent"), "the menu is drawn");
+        assert!(
+            !text.contains("SECRET_LINE"),
+            "the ide shows around the agent menu:\n{text}"
+        );
     }
 }
 
@@ -5875,5 +5948,39 @@ mod completion_tests {
             assert_eq!(marked, "{▌");
         }));
         assert!(r.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod hub_truncation_tests {
+    use super::*;
+
+    /// a long memory note in the hub's left box is cut at the edge of the
+    /// card, and the cut says so: no letter is lost without a sign.
+    #[test]
+    fn a_long_hub_row_is_cut_with_an_ellipsis_not_at_the_border() {
+        let d = std::env::temp_dir().join(format!("nana-trunc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".nana")).unwrap();
+        // two pages: the selected row shows no note, so the long one must sit
+        // on an unselected row to be drawn at all
+        let m = crate::memory::Memory::open(&d);
+        m.write(
+            crate::memory::Class::Project,
+            "stack",
+            &format!("# {}\n\nbody", "x".repeat(80)),
+        )
+        .unwrap();
+        m.write(crate::memory::Class::Project, "other", "# short\n\nbody")
+            .unwrap();
+        let mut ed = Editor::open(None).unwrap();
+        ed.hub = Some(crate::hub::Hub::open(&d));
+        let text = render_text(&mut ed, 110, 30);
+        let _ = std::fs::remove_dir_all(&d);
+        let rows: Vec<&str> = text.lines().collect();
+        assert!(
+            rows.iter().any(|r| r.contains("…")),
+            "a cut row has no ellipsis:\n{text}"
+        );
     }
 }

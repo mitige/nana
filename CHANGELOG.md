@@ -15,6 +15,12 @@
 - `super+t` opens the terminal, like `f3`.
 - rounded corners on every box, band and segment; no square corner left.
 - `cargo fmt --check` is clean, so the ci passes.
+- the agent is always told to check memory before a task and to write what it
+  learns, even when the memory is still empty; the memory tools say so too.
+- the readme shows the hub, the editor and the terminal, captured from the
+  real binary.
+- the agent menu and the file search are windows of their own, like the hub:
+  nothing of the ide is drawn around them any more.
 
 ## 1.0.0
 
