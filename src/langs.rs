@@ -1081,13 +1081,10 @@ mod tests {
         );
         assert_eq!(prog, "gcc");
         let abs = std::path::absolute(Path::new("/home/me/main.c")).unwrap();
+        let slash = |p: &Path| p.display().to_string().replace('\\', "/");
         assert_eq!(
             args,
-            vec![
-                abs.display().to_string(),
-                "-o".to_string(),
-                tmp.join("bin").display().to_string()
-            ]
+            vec![slash(&abs), "-o".to_string(), slash(&tmp.join("bin"))]
         );
         // a relative path is handed over absolute, so any cwd works
         let (_, rel) = expand(

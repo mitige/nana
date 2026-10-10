@@ -1,5 +1,9 @@
 # changelog
 
+## 2.2.2
+
+- the windows test suite compares paths with forward slashes, as the code emits them.
+
 ## 2.2.1
 
 - the test suite runs on windows: paths are built with the platform separator.
