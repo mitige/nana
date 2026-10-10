@@ -582,6 +582,12 @@ fn detect_git_branch(dir: PathBuf) -> Option<String> {
 }
 
 impl Editor {
+    /// the start screen is the hub, for the project at `root`: the ide stays
+    /// behind it until the user closes the menu.
+    pub fn open_hub_at_start(&mut self, root: &Path) {
+        self.hub = Some(crate::hub::Hub::open(root));
+    }
+
     pub fn open(path: Option<&Path>) -> io::Result<Self> {
         let (lines, file) = match path {
             Some(p) if p.exists() => {
@@ -4086,6 +4092,24 @@ fn draw_body(frame: &mut Frame, ed: &Editor, zone: ratatui::layout::Rect) {
     }
 }
 
+/// the editor as the user first sees it: the hub, on the project at the start.
+/// the ide (explorer, buffer, terminal) waits behind it, one esc away.
+fn start_editor(path: &Option<PathBuf>) -> io::Result<Editor> {
+    let (file, root) = startup_layout(path);
+    let mut ed = Editor::open(file.as_deref())?;
+    ed.explorer = Some(Explorer::new(root.clone()));
+    // un seul modèle, toujours le même — pas de réglage, pas de dérive
+    let ai = AiClient::from_env(&crate::config::load())
+        .ok()
+        .map(|mut c| {
+            c.set_model(EDITOR_MODEL);
+            c
+        });
+    ed.ai = ai;
+    ed.open_hub_at_start(&root);
+    Ok(ed)
+}
+
 /// Lance l'éditeur. `path` : fichier à ouvrir/créer.
 pub fn run(path: Option<PathBuf>) -> io::Result<()> {
     // NO_COLOR est une convention pensée pour les logs, pas pour un éditeur :
@@ -4096,19 +4120,7 @@ pub fn run(path: Option<PathBuf>) -> io::Result<()> {
     std::env::remove_var("NO_COLOR");
     // IDE complet dès l'ouverture : explorateur + terminal toujours visibles,
     // le focus reste à l'éditeur (ou à l'accueil)
-    let (file, root) = startup_layout(&path);
-    let mut ed = Editor::open(file.as_deref())?;
-    // défaut : éditeur + explorateur seulement — le terminal reste fermé,
-    // F3 l'ouvre à la demande.
-    ed.explorer = Some(Explorer::new(root.clone()));
-    // un seul modèle, toujours le même — pas de réglage, pas de dérive
-    let ai = AiClient::from_env(&crate::config::load())
-        .ok()
-        .map(|mut c| {
-            c.set_model(EDITOR_MODEL);
-            c
-        });
-    ed.ai = ai;
+    let mut ed = start_editor(&path)?;
 
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
@@ -4781,6 +4793,35 @@ mod hub_takes_the_screen_tests {
             "status bar leaks behind the hub"
         );
         assert!(!text.contains("⎇ main"), "top bar leaks behind the hub");
+    }
+}
+
+#[cfg(test)]
+mod hub_is_the_start_tests {
+    use super::*;
+
+    /// nana opens on the hub: the first thing a user sees is the menu, and
+    /// nothing of the ide (explorer, buffer, status bar) is drawn behind it.
+    #[test]
+    fn a_bare_start_opens_on_the_hub_alone() {
+        let root = scratch("start");
+        std::fs::write(root.join("a.rs"), "fn secret_start_text() {}\n").unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&root).unwrap();
+        let started = start_editor(&None);
+        std::env::set_current_dir(&cwd).unwrap();
+        let mut ed = started.unwrap();
+        let text = render_text(&mut ed, 110, 30);
+        assert!(ed.hub.is_some(), "the hub is the start screen");
+        assert!(
+            !text.contains("a.rs"),
+            "explorer leaks behind the start hub"
+        );
+        assert!(
+            !text.contains("ln 1, col 1"),
+            "status bar leaks behind the start hub"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

@@ -2,6 +2,8 @@
 
 ## 2.0.0
 
+- nana opens on the hub: the menu is the only thing on screen at start, and
+  `esc` gives back the ide behind it.
 - the hub (`ctrl+w`): memory, knowledge, providers, skills, personas and the
   company, in rounded boxes, with the keys to act on each of them.
 - the company (`agents` box, `nana --company`): a ceo hires the team, each

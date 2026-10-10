@@ -6,6 +6,8 @@ version 2.0.
 
 ![nana, the welcome screen](docs/shots/test1.png)
 
+![nana opens on the hub: nothing of the ide is drawn behind it](docs/shots/hub-start.png)
+
 ## what it is
 
 nana is a small, fast, keyboard-driven editor for the terminal — and it knows
