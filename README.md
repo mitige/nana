@@ -226,6 +226,25 @@ rust, no async, every feature gets a test
 EOF
 ```
 
+### the wiki: what the project taught
+
+memory holds facts about you and the project; the wiki holds **what the work
+taught**: how the build really runs, which test is flaky, why a decision was
+made. pages are markdown under `<project>/.nana/knowledge/`, and the agent is
+told which pages exist, never their contents — it opens one when it matters.
+
+```sh
+nana --knowledge               # the pages, and the recent audits
+nana --knowledge show build
+nana --knowledge search "release"
+nana --dream 10                # consolidate the last 10 sessions into the wiki
+```
+
+`--dream` reads the latest sessions and writes back what they taught: new or
+updated pages, plus a dated page under `knowledge/audit/` that lists what it
+read and what it changed. the audit is the history, so the change itself is
+reviewable with `git diff`. nothing is rewritten silently.
+
 ### the hub: the boxes
 
 `ctrl+w` opens the hub: the project's boxes side by side, a navigation card on
@@ -438,7 +457,7 @@ final_newline = true
 ## development
 
 ```sh
-cargo test        # 193 tests, no network, no fixtures to download
+cargo test        # 205 tests, no network, no fixtures to download
 cargo run         # the editor, on this repository
 cargo run -- --languages
 ```
