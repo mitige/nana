@@ -26,8 +26,7 @@ build systems and frameworks. the whole table lives in one file
 
 ### c, in a project
 
-the badge names the language, the right of the top bar names the project
-, and the gutter is calm.
+the badge names the language, the right of the top bar names the project, and the gutter is calm.
 
 ![a c file in a project](docs/shots/test2.png)
 
