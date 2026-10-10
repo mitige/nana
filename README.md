@@ -4,9 +4,7 @@ an adaptive terminal editor. one buffer, every language.
 
 version 2.0.
 
-![nana, the welcome screen](docs/shots/image.png)
-
-![the hub, alone on screen, rounded edges](docs/shots/hub-2.0.png)
+![nana, the welcome screen](docs/shots/test1.png)
 
 ## what it is
 
@@ -26,16 +24,12 @@ recipe, their formatter, their icon — plus project detection for the common
 build systems and frameworks. the whole table lives in one file
 ([`src/langs.rs`](src/langs.rs)), so adding a language is adding a row.
 
-## screenshots
-
-![the built-in terminal, opened with super+t](docs/shots/terminal-super-t.png)
-
 ### c, in a project
 
 the badge names the language, the right of the top bar names the project
 , and the gutter is calm.
 
-![a c file in a project](docs/shots/image3.png)
+![a c file in a project](docs/shots/test2.png)
 
 ### `f5` runs it
 
@@ -43,7 +37,7 @@ the built-in terminal runs the project's command when there is one, the file's
 own recipe otherwise. it is a real pty, and it answers terminal queries, so
 modern shells start cleanly inside it.
 
-![running a python file in the built-in terminal](docs/shots/image2.png)
+![running a python file in the built-in terminal](docs/shots/test4.png)
 
 ## install
 
@@ -174,13 +168,15 @@ csv, diff, dotenv, gitconfig.
 nana is also an agent. it reads your project, it can act on it, and it keeps
 what it learns — per project, on disk, in markdown you can read and edit.
 
-![the hub, boxes with rounded edges](docs/shots/hub-2.0.png)
+![the hub, boxes with rounded edges](docs/shots/test5.png)
 
 ### the panel
 
 `ctrl+a` opens the agent. the card takes the keyboard: type your request,
 `enter` sends it, `esc` closes the card — and `esc` again while it is thinking
 cancels the request.
+
+![the agent](docs/shots/test3.png)
 
 the card shows the whole exchange as it happens:
 
@@ -468,10 +464,6 @@ cargo test        # 207 tests, no network, no fixtures to download
 cargo run         # the editor, on this repository
 cargo run -- --languages
 ```
-
-the screenshots in this readme are generated, not hand-taken: a capture of the
-real pty stream is replayed through `vt100` (see `examples/vtdump.rs`) and
-rendered to png. so they cannot drift from the ui without being regenerated.
 
 ## license
 
