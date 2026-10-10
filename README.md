@@ -2,7 +2,7 @@
 
 an adaptive terminal editor. one buffer, every language.
 
-version 2.2.2.
+version 2.2.3.
 
 ![nana, the welcome screen](docs/shots/test1.png)
 

@@ -1,6 +1,6 @@
 [package]
 name = "nana"
-version = "2.2.2"
+version = "2.2.3"
 edition = "2021"
 description = "An adaptive terminal editor: every language, one sober ui"
 license = "MIT"

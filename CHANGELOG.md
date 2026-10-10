@@ -1,5 +1,9 @@
 # changelog
 
+## 2.2.3
+
+- the windows test suite builds the expected absolute paths with the platform rules.
+
 ## 2.2.2
 
 - the windows test suite compares paths with forward slashes, as the code emits them.

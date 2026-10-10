@@ -1105,7 +1105,11 @@ mod tests {
             expand_arg("{stem}", Path::new("/a/b/hello.py"), tmp),
             "hello"
         );
-        assert_eq!(expand_arg("{dir}", Path::new("/a/b/hello.py"), tmp), "/a/b");
+        let dir = std::path::absolute(Path::new("/a/b")).unwrap();
+        assert_eq!(
+            expand_arg("{dir}", Path::new("/a/b/hello.py"), tmp).replace('\\', "/"),
+            dir.display().to_string().replace('\\', "/")
+        );
     }
 
     #[test]
