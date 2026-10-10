@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Memory,
+    Knowledge,
     Providers,
     Skills,
     Personas,
@@ -26,17 +27,19 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 5] = [
+    pub const ALL: [Section; 6] = [
         Section::Memory,
         Section::Providers,
         Section::Skills,
         Section::Personas,
         Section::Agents,
+        Section::Knowledge,
     ];
 
     pub fn title(&self) -> &'static str {
         match self {
             Section::Memory => "memory",
+            Section::Knowledge => "knowledge",
             Section::Providers => "providers",
             Section::Skills => "skills",
             Section::Personas => "personas",
@@ -48,6 +51,7 @@ impl Section {
     pub fn hint(&self) -> &'static str {
         match self {
             Section::Memory => "what this project has learned — read, write, forget",
+            Section::Knowledge => "the project's wiki — hand written, or dreamed from the sessions",
             Section::Providers => "who can answer, and which model is current",
             Section::Skills => "packaged workflows, picked up by their trigger",
             Section::Personas => "saved system prompts, project or user",
@@ -61,6 +65,8 @@ impl Section {
 pub enum Action {
     /// nothing to do, it is information
     None,
+    /// open a knowledge page in the editor
+    ReadKnowledge(String),
     /// open a memory page in the editor
     ReadMemory(Class, String),
     /// use this model from now on
@@ -86,6 +92,10 @@ pub enum Purpose {
     Filter,
     /// a name for a new memory page of that class
     NewMemory(Class),
+    /// a name for a new knowledge page
+    NewKnowledge,
+    /// consolidate the latest sessions into the wiki
+    Dream,
     /// a name for a new persona
     NewPersona,
     /// a name for a new skill
@@ -104,6 +114,8 @@ impl Purpose {
         match self {
             Purpose::Filter => "filter".into(),
             Purpose::NewMemory(c) => format!("new {} page", c.id()),
+            Purpose::NewKnowledge => "new knowledge page".into(),
+            Purpose::Dream => "dreaming".into(),
             Purpose::NewPersona => "new persona".into(),
             Purpose::NewSkill => "new skill".into(),
             Purpose::Hire => "mission for the ceo".into(),
@@ -252,6 +264,7 @@ impl Hub {
     pub fn refresh(&mut self) {
         let mut items = match self.current() {
             Section::Memory => self.memory_items(),
+            Section::Knowledge => self.knowledge_items(),
             Section::Providers => self.provider_items(),
             Section::Skills => self.skill_items(),
             Section::Personas => self.persona_items(),
@@ -280,6 +293,26 @@ impl Hub {
                 action: Action::ReadMemory(e.class, e.name),
             })
             .collect()
+    }
+
+    /// the wiki: written pages first, then the audit trail.
+    fn knowledge_items(&self) -> Vec<Item> {
+        let mut out: Vec<Item> = crate::knowledge::list(&self.root)
+            .into_iter()
+            .map(|p| Item {
+                label: p.name.clone(),
+                note: format!("{} — {} lines", p.title, p.lines),
+                action: Action::ReadKnowledge(p.name),
+            })
+            .collect();
+        for a in crate::knowledge::audit_list(&self.root).into_iter().rev() {
+            out.push(Item {
+                label: format!("audit/{}", a.name),
+                note: format!("{} lines", a.lines),
+                action: Action::ReadKnowledge(format!("audit/{}", a.name)),
+            });
+        }
+        out
     }
 
     fn provider_items(&self) -> Vec<Item> {
@@ -370,6 +403,8 @@ impl Hub {
         self.detail = match &item.action {
             Action::ReadMemory(class, name) => Memory::open(&self.root)
                 .read(*class, name)
+                .unwrap_or_else(|e| format!("unreadable: {e}")),
+            Action::ReadKnowledge(name) => crate::knowledge::read(&self.root, name)
                 .unwrap_or_else(|e| format!("unreadable: {e}")),
             Action::SetPersona(id) => persona::load(Some(&self.root), id)
                 .map(|p| {
@@ -462,6 +497,16 @@ impl Hub {
         self.purpose = Purpose::Filter;
         self.input.clear();
         match purpose {
+            Purpose::NewKnowledge => {
+                let path = crate::knowledge::write(
+                    &self.root,
+                    &value,
+                    &format!("# {value}\n\ntodo: what this project should know"),
+                )
+                .map_err(|e| e)?;
+                self.refresh();
+                Ok(Outcome::OpenFile(path))
+            }
             Purpose::NewMemory(class) => {
                 let m = Memory::open(&self.root);
                 let path = m
@@ -506,8 +551,52 @@ impl Hub {
                 self.refresh();
                 Ok(Outcome::Say(msg))
             }
+            Purpose::Dream => {
+                self.dream();
+                Ok(Outcome::Say("dreaming over the latest sessions".into()))
+            }
             Purpose::Filter => Ok(Outcome::None),
         }
+    }
+
+    /// the dream: read the latest sessions, write back what they taught.
+    /// it runs in the background, like the hiring.
+    pub fn dream(&mut self) {
+        let root = self.root.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.rx = Some(rx);
+        self.busy = Some("dreaming over the sessions".into());
+        self.activity.clear();
+        std::thread::spawn(move || {
+            let settings = Settings::load(&root);
+            let date = today();
+            match crate::agent::Agent::new(&root, settings) {
+                Ok(mut runner) => match crate::knowledge::dream(&mut runner, 10, &date) {
+                    Ok(report) => {
+                        let mut text = format!(
+                            "read {} session(s), wrote {} page(s)",
+                            report.read_sessions,
+                            report.pages.len()
+                        );
+                        if !report.pages.is_empty() {
+                            text.push_str(": ");
+                            text.push_str(&report.pages.join(", "));
+                        }
+                        if let Some(a) = &report.audit {
+                            text.push_str(&format!("\naudit: {}", a.display()));
+                        }
+                        let _ = tx.send(crate::agent::Event::Text(text));
+                        let _ = tx.send(crate::agent::Event::Finished { steps: 1 });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(crate::agent::Event::Error(e));
+                    }
+                },
+                Err(e) => {
+                    let _ = tx.send(crate::agent::Event::Error(e));
+                }
+            }
+        });
     }
 
     /// enter in browse mode: the selected item's action.
@@ -527,7 +616,7 @@ impl Hub {
                 Ok(Outcome::Say(msg))
             }
             Action::RunSkill(name) => Ok(Outcome::Say(format!("skill {name}"))),
-            Action::ReadMemory(_, _) | Action::None => Ok(Outcome::None),
+            Action::ReadMemory(_, _) | Action::ReadKnowledge(_) | Action::None => Ok(Outcome::None),
         }
     }
 
@@ -541,6 +630,8 @@ impl Hub {
                 .root()
                 .join(class.id())
                 .join(format!("{name}.md")),
+            Action::ReadKnowledge(name) => crate::knowledge::root_of(&self.root)
+                .join(format!("{}.md", name.trim_end_matches(".md"))),
             Action::SetPersona(id) | Action::RunSkill(id) => {
                 // personas and skills are files too: find the one that owns it
                 let mut found = None;
@@ -573,6 +664,12 @@ impl Hub {
                 Memory::open(&self.root).forget(*class, name)?;
                 format!("forgotten: {name}")
             }
+            Action::ReadKnowledge(name) => {
+                let path = crate::knowledge::root_of(&self.root)
+                    .join(format!("{}.md", name.trim_end_matches(".md")));
+                std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+                format!("forgotten: {name}")
+            }
             Action::SetPersona(id) => {
                 persona::delete(Some(&self.root), id)?;
                 format!("persona {id} deleted")
@@ -600,6 +697,7 @@ impl Hub {
     pub fn new_purpose(&self) -> Purpose {
         match self.current() {
             Section::Memory => Purpose::NewMemory(Class::Project),
+            Section::Knowledge => Purpose::NewKnowledge,
             Section::Personas => Purpose::NewPersona,
             Section::Skills => Purpose::NewSkill,
             Section::Agents => Purpose::Hire,
@@ -706,6 +804,46 @@ impl Hub {
     }
 }
 
+/// today, as a page name: 2026-10-10.
+fn today() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86_400;
+    let (mut y, mut d) = (1970i64, days as i64);
+    loop {
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let len = if leap { 366 } else { 365 };
+        if d < len {
+            break;
+        }
+        d -= len;
+        y += 1;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let months = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut m = 0;
+    while m < 12 && d >= months[m] {
+        d -= months[m];
+        m += 1;
+    }
+    format!("{y}-{:02}-{:02}", m + 1, d + 1)
+}
+
 /// the section list for the left column, with a marker on the current one.
 pub fn section_titles(current: Section) -> Vec<String> {
     Section::ALL
@@ -730,7 +868,7 @@ pub fn apply(root: &Path, action: &Action) -> Result<String, String> {
             Ok(format!("persona is now {id}"))
         }
         Action::RunSkill(name) => Ok(format!("run the skill {name}")),
-        Action::ReadMemory(_, _) | Action::None => Ok(String::new()),
+        Action::ReadMemory(_, _) | Action::ReadKnowledge(_) | Action::None => Ok(String::new()),
     }
 }
 
@@ -782,6 +920,24 @@ mod tests {
         let names: Vec<&str> = hub.items().iter().map(|i| i.label.as_str()).collect();
         assert!(names.contains(&"project: stack"), "{names:?}");
         assert!(names.contains(&"user: tone"), "{names:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_knowledge_box_lists_the_wiki_pages() {
+        let d = seeded();
+        crate::knowledge::write(&d, "build", "# how it builds\n\ncargo build").unwrap();
+        let mut hub = Hub::open(&d);
+        while hub.current() != Section::Knowledge {
+            hub.next_section();
+        }
+        let labels: Vec<&str> = hub.items().iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, vec!["build"], "{labels:?}");
+        assert!(
+            hub.items()[0].note.contains("how it builds"),
+            "{}",
+            hub.items()[0].note
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

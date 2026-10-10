@@ -43,6 +43,8 @@ fn main() {
             0
         }
         Some("--company") => company_cmd(&root, &args[1..]),
+        Some("--knowledge") => knowledge_cmd(&root, &args[1..]),
+        Some("--dream") => dream_cmd(&root, &args[1..]),
         Some("--memory") => memory_cmd(&root, &args[1..]),
         Some("--persona") => persona_cmd(&root, &args[1..]),
         Some("--show-prompt") => show_prompt(&root, &args[1..]),
@@ -74,6 +76,8 @@ usage: nana [file|dir]          open the editor
        nana --providers         list the model providers
        nana --memory …          the project's memory
        nana --company …         the company: hire, task, fire, mail
+       nana --knowledge …       the project's wiki: list, show, search, write
+       nana --dream [n]         consolidate the last sessions into the wiki
        nana --persona …         saved system prompts
        nana --skills            skills this project offers
        nana --show-prompt \"…\"   print the assembled system prompt
@@ -171,6 +175,146 @@ fn print_skills(root: &Path) {
             }
         );
     }
+}
+
+/// the project's wiki: read it, write it, search it.
+fn knowledge_cmd(root: &Path, rest: &[String]) -> i32 {
+    use nana::knowledge;
+    match rest.first().map(String::as_str) {
+        None | Some("list") => {
+            print!("{}", knowledge::describe(root));
+            0
+        }
+        Some("show") => {
+            let Some(name) = rest.get(1) else {
+                eprintln!("usage: nana --knowledge show <page>");
+                return 2;
+            };
+            match knowledge::read(root, name) {
+                Ok(text) => {
+                    print!("{text}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("nana: {e}");
+                    1
+                }
+            }
+        }
+        Some("search") => {
+            let Some(q) = rest.get(1) else {
+                eprintln!("usage: nana --knowledge search <text>");
+                return 2;
+            };
+            let hits = knowledge::search(root, q);
+            for h in &hits {
+                println!("{}:{}: {}", h.page, h.line, h.text);
+            }
+            if hits.is_empty() {
+                println!("no match in the wiki");
+            }
+            0
+        }
+        Some("write") => {
+            let Some(name) = rest.get(1) else {
+                eprintln!("usage: nana --knowledge write <page> <<'EOF' … EOF");
+                return 2;
+            };
+            let mut body = String::new();
+            use std::io::Read;
+            if std::io::stdin().read_to_string(&mut body).is_err() || body.trim().is_empty() {
+                eprintln!("nana: nothing on stdin");
+                return 2;
+            }
+            match knowledge::write(root, name, &body) {
+                Ok(p) => {
+                    println!("wrote {}", p.display());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("nana: {e}");
+                    1
+                }
+            }
+        }
+        Some(other) => {
+            eprintln!("nana: unknown knowledge command {other}");
+            2
+        }
+    }
+}
+
+/// /dream: consolidate the latest sessions into the wiki.
+fn dream_cmd(root: &Path, rest: &[String]) -> i32 {
+    let how_many: usize = rest.first().and_then(|s| s.parse().ok()).unwrap_or(10);
+    let settings = settings::Settings::load(root);
+    let mut runner = match agent::Agent::new(root, settings) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("nana: {e}");
+            return 1;
+        }
+    };
+    eprintln!("dreaming over the {how_many} latest session(s)…");
+    let date = today();
+    match nana::knowledge::dream(&mut runner, how_many, &date) {
+        Ok(report) => {
+            println!(
+                "read {} session(s), wrote {} page(s): {}",
+                report.read_sessions,
+                report.pages.len(),
+                report.pages.join(", ")
+            );
+            if let Some(a) = report.audit {
+                println!("audit: {}", a.display());
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("nana: {e}");
+            1
+        }
+    }
+}
+
+/// today, for the audit page name.
+fn today() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86_400;
+    let (mut y, mut d) = (1970i64, days as i64);
+    loop {
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let len = if leap { 366 } else { 365 };
+        if d < len {
+            break;
+        }
+        d -= len;
+        y += 1;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let months = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut m = 0;
+    while m < 12 && d >= months[m] {
+        d -= months[m];
+        m += 1;
+    }
+    format!("{y}-{:02}-{:02}", m + 1, d + 1)
 }
 
 /// the company: a ceo that hires, employees that work.

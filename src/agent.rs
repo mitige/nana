@@ -14,8 +14,6 @@ use crate::tools::{self, Ctx};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-pub const MAX_STEPS: usize = 12;
-
 /// a section of the system prompt, with its position. lower order = earlier.
 #[derive(Debug, Clone)]
 pub struct Section {
@@ -176,6 +174,17 @@ impl Agent {
                 text: format!("{mem}read a page with the memory_read tool when it matters."),
             });
         }
+        let wiki = crate::knowledge::index(&self.root);
+        if !wiki.is_empty() {
+            out.push(Section {
+                order: 450,
+                name: "knowledge",
+                text: format!(
+                    "{wiki}read a page with the read_file tool when it matters. when a session \
+                     teaches something durable, it is worth a page."
+                ),
+            });
+        }
         out.push(Section {
             order: 1000,
             name: "tools",
@@ -211,8 +220,12 @@ impl Agent {
             step: 0,
         });
         let specs = tools::specs();
-        for step in 0..MAX_STEPS {
-            self.steps = step + 1;
+        // no step cap: a long session runs until the model answers in words
+        // (or the provider fails); stopping on a count left people re-prompting.
+        let mut step = 0;
+        loop {
+            step += 1;
+            self.steps = step;
             let reply: Reply = match self.client.chat(&system, &self.messages, &specs) {
                 Ok(r) => r,
                 Err(e) => {
@@ -231,7 +244,7 @@ impl Agent {
                     tool_call_id: None,
                 });
                 self.log("assistant", &reply.text, None, None);
-                on(Event::Finished { steps: step + 1 });
+                on(Event::Finished { steps: step });
                 return Ok(reply.text);
             }
             // the model wants tools: answer every call, then loop
@@ -265,9 +278,6 @@ impl Agent {
                 );
             }
         }
-        let msg = format!("stopped after {MAX_STEPS} steps without a final answer");
-        on(Event::Error(msg.clone()));
-        Err(msg)
     }
 
     /// append one line to the transcript of this project.
@@ -436,6 +446,7 @@ mod tests {
         .unwrap();
         std::fs::write(d.join("AGENTS.md"), "always write tests\n").unwrap();
         std::fs::create_dir_all(d.join(".nana/skills")).unwrap();
+        crate::knowledge::write(&d, "build", "# build\n\ncargo build --release").unwrap();
         std::fs::write(
             d.join(".nana/skills/rel.md"),
             "---\nname: rel\ndescription: releases\ntrigger: release\n---\nstep one\n",
@@ -456,6 +467,7 @@ mod tests {
         assert!(spos < tpos, "skills before the tool note");
         // a matching trigger brings the skill body in
         assert!(p.contains("step one"), "the triggered skill is included");
+        assert!(p.contains("- build: build"), "the wiki is announced: {p}");
         let q = a.system_prompt("write a poem");
         assert!(!q.contains("step one"), "and only when it matches");
         let _ = std::fs::remove_dir_all(&d);
@@ -537,20 +549,29 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_final_answer_stops_instead_of_looping_forever() {
-        let d = tmp("endless");
-        // the model keeps asking for a tool, never concludes
+    fn a_long_session_keeps_going_until_the_model_answers() {
+        let d = tmp("long");
+        // far past the old 12-step cap: the agent must not stop on its own
+        let calls = 30;
         let mut bodies = Vec::new();
-        for i in 0..MAX_STEPS {
+        for i in 0..calls {
             bodies.push(format!(
                 r#"{{"choices":[{{"message":{{"content":"","tool_calls":[
                     {{"id":"c{i}","type":"function","function":{{"name":"list_dir","arguments":"{{}}"}}}}]}}}}]}}"#
             ));
         }
-        let (url, _s) = scripted(bodies);
+        bodies.push(r#"{"choices":[{"message":{"content":"all done"}}]}"#.to_string());
+        let (url, server) = scripted(bodies);
         let mut a = agent_at(&d, &url);
-        let err = a.run("loop forever", |_| {}).unwrap_err();
-        assert!(err.contains("without a final answer"), "{err}");
+        let mut events = Vec::new();
+        let answer = a
+            .run("keep going", |e| events.push(e))
+            .expect("a long session must not be cut off");
+        assert_eq!(answer, "all done");
+        assert_eq!(server.join().unwrap().len(), calls + 1, "every step was sent");
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, Event::Finished { steps } if *steps == calls + 1)));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

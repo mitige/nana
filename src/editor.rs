@@ -1757,6 +1757,18 @@ impl Editor {
             KeyCode::Char('e') if ctrl => self.hub_edit(),
             KeyCode::Char('d') if ctrl => self.hub_delete(),
             KeyCode::Char('t') if ctrl => self.hub_task(),
+            // ctrl+r: dream over the latest sessions, in the knowledge box
+            KeyCode::Char('r') if ctrl => {
+                if let Some(h) = self.hub.as_mut() {
+                    if h.current() == crate::hub::Section::Knowledge {
+                        h.begin(crate::hub::Purpose::Dream);
+                        let outcome = h.submit();
+                        if let Ok(crate::hub::Outcome::Say(m)) = outcome {
+                            self.status = m;
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -2576,7 +2588,8 @@ fn border_for(focused: bool) -> Color {
     if focused {
         Color::Indexed(6) // cyan du shell — le focus se voit, sans crier
     } else {
-        Ed::ruler()
+        // a quiet blue, not a grey: an idle card keeps a colour of its own
+        Color::Indexed(4)
     }
 }
 
@@ -2790,6 +2803,14 @@ fn draw(frame: &mut Frame, ed: &mut Editor) {
     let area = frame.area();
     // fond unifié sur toute la surface — la signature « Minuit »
     fill(frame, area, Style::default().bg(Ed::bg()));
+    // the hub is the whole screen: no top bar, no editor, no status bar behind
+    // it. the menu is the only thing the user sees until it is closed.
+    if let Some(hub) = &mut ed.hub {
+        clear_area(frame, area);
+        draw_hub(frame, hub, area);
+        draw_toasts(frame, ed, area);
+        return;
+    }
 
     // one blank line under the top bar and one above the status bar: a card
     // whose top border touches the bar is a rectangle, not a card. the air
@@ -4724,6 +4745,95 @@ mod paste_tests {
 }
 
 #[cfg(test)]
+mod hub_takes_the_screen_tests {
+    use super::*;
+
+    /// the hub is a menu, not a window over the ide: with it open, nothing of
+    /// the editor (top bar, status bar, buffer text) may be left on screen.
+    #[test]
+    fn with_the_hub_open_no_ide_chrome_is_visible() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.lines = vec!["fn secret_buffer_text() {}".into()];
+        ed.hub = Some(crate::hub::Hub::open(std::path::Path::new(".")));
+        let text = render_text(&mut ed, 110, 30);
+        assert!(
+            !text.contains("secret_buffer_text"),
+            "buffer leaks behind the hub"
+        );
+        assert!(
+            !text.contains("ln 1, col 1"),
+            "status bar leaks behind the hub"
+        );
+        assert!(!text.contains("⎇ main"), "top bar leaks behind the hub");
+    }
+}
+
+#[cfg(test)]
+mod rounded_everywhere_tests {
+    use super::*;
+
+    /// every card, in every state the user can open, is drawn with rounded
+    /// corners: a square corner anywhere is a regression of the visual promise.
+    #[test]
+    fn no_panel_has_a_square_corner() {
+        let root = scratch("rounded");
+        std::fs::write(root.join("a.rs"), "fn main() {}\n").unwrap();
+        for setup in 0..3 {
+            let mut ed = Editor::open(None).unwrap();
+            ed.lines = vec!["fn main() {}".into()];
+            ed.explorer = Some(Explorer::new(root.clone()));
+            if setup == 1 {
+                ed.term = TermPane::spawn(&root, 8, 60).ok();
+            }
+            if setup == 2 {
+                ed.search = Some(FileSearch::new(root.clone()));
+            }
+            let text: String = render_text(&mut ed, 110, 32);
+            for square in ["┌", "┐", "└", "┘", "├", "┤"] {
+                assert!(
+                    !text.contains(square),
+                    "square corner {square} in state {setup}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod sober_badge_tests {
+    use super::*;
+
+    /// the badge colour of a focused modal, read from the drawn screen: the search
+    /// carries the single focus accent, not a second colour. the hub has no status
+    /// bar at all (it is the whole screen), so it is not checked here.
+    #[test]
+    fn search_badge_is_not_magenta() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.focus = Focus::Search;
+        ed.search = Some(FileSearch::new(std::path::PathBuf::from(".")));
+        let fg = badge_fg(&mut ed, "search");
+        assert_ne!(fg, Color::Indexed(5), "search badge is magenta");
+    }
+
+    /// colour of the left status-bar pill, read at the cell that holds its label.
+    fn badge_fg(ed: &mut Editor, label: &str) -> Color {
+        let backend = ratatui::backend::TestBackend::new(110, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, ed)).unwrap();
+        let buf = term.backend().buffer();
+        let first = label.chars().next().unwrap().to_string();
+        for x in 0..110u16 {
+            let cell = &buf[(x, 29)];
+            if cell.symbol() == first && buf[(x + 1, 29)].symbol() == &label[1..2] {
+                return cell.fg;
+            }
+        }
+        panic!("label {label} not found on the status bar");
+    }
+}
+
+#[cfg(test)]
 mod layout_tests {
     use super::*;
 
@@ -4997,12 +5107,16 @@ mod hub_ui_tests {
             band > left && band < bottom,
             "the band is inside the card: {band} in {left}..{bottom}"
         );
-        // and the frame is still a frame: the bars are drawn, the cards are
-        // cards, and the buffer is not smeared across the screen
-        assert!(rows[0].contains("nana"), "the top bar is there");
+        // the hub is the whole screen: the ide bars must not show through it
         assert!(
-            rows.last().unwrap().contains("ln 1, col 1"),
-            "the status bar is there"
+            !rows[0].contains("nana  "),
+            "the top bar leaks: {}",
+            rows[0]
+        );
+        assert!(
+            !rows.last().unwrap().contains("ln 1, col 1"),
+            "the status bar leaks: {}",
+            rows.last().unwrap()
         );
         let _ = std::fs::remove_dir_all(&d);
     }

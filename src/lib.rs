@@ -21,6 +21,7 @@ pub mod explorer;
 pub mod header;
 pub mod highlight;
 pub mod hub;
+pub mod knowledge;
 pub mod langs;
 pub mod memory;
 pub mod persona;

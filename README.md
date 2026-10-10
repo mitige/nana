@@ -235,6 +235,7 @@ would otherwise send you to a shell happens here.
 | box | what you can do in it |
 | --- | --- |
 | memory | read a page, write a new one, edit it, forget it |
+| knowledge | read a wiki page, write one, dream over the last sessions |
 | providers | see who can answer, pick the model with a keystroke |
 | skills | read one, run it (it hands itself to the agent), write a new one |
 | personas | read it, use it by default, edit it, delete it |
