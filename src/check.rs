@@ -67,7 +67,8 @@ impl Default for StyleCfg {
 }
 
 /// the universal pass. text is what is on disk, so the gutter matches it.
-pub fn style_findings(text: &str, cfg: &StyleCfg) -> Vec<Finding> {
+/// `tabs_ok` is true for the languages whose convention *is* a tab.
+pub fn style_findings(text: &str, cfg: &StyleCfg, tabs_ok: bool) -> Vec<Finding> {
     let mut out = Vec::new();
     let mut lines: Vec<&str> = text.split('\n').collect();
     // split('\n') leaves a trailing "" when the file ends with a newline
@@ -85,7 +86,7 @@ pub fn style_findings(text: &str, cfg: &StyleCfg) -> Vec<Finding> {
                 rule: "style".into(),
             });
         }
-        if cfg.tabs && line.starts_with('\t') {
+        if cfg.tabs && !tabs_ok && line.starts_with('\t') {
             out.push(Finding {
                 line: n,
                 severity: Severity::Minor,
@@ -163,7 +164,7 @@ pub fn check_path(path: &Path, cfg: &StyleCfg) -> Report {
     let mut tool_note = String::new();
 
     match std::fs::read_to_string(path) {
-        Ok(text) => findings.extend(style_findings(&text, cfg)),
+        Ok(text) => findings.extend(style_findings(&text, cfg, lang.tabs_by_convention())),
         Err(e) => {
             tool_note = format!("unreadable ({e})");
         }
@@ -218,6 +219,7 @@ mod tests {
                 max_columns: 0,
                 ..Default::default()
             },
+            false,
         );
         let msgs: Vec<&str> = f.iter().map(|x| x.message.as_str()).collect();
         assert!(msgs.contains(&"trailing whitespace"), "{msgs:?}");
@@ -237,14 +239,26 @@ mod tests {
                 max_columns: 50,
                 ..Default::default()
             },
+            false,
         );
         assert_eq!(f.len(), 1);
         assert!(f[0].message.contains("60 columns"));
     }
 
     #[test]
+    fn a_language_that_indents_with_tabs_is_not_flagged_for_it() {
+        let f = style_findings("func main() {\n\tx := 1\n}\n", &StyleCfg::default(), true);
+        assert!(
+            !f.iter().any(|x| x.message.contains("tab")),
+            "go is not wrong to use a tab: {f:?}"
+        );
+        let f = style_findings("def f():\n\tpass\n", &StyleCfg::default(), false);
+        assert!(f.iter().any(|x| x.message.contains("tab")), "{f:?}");
+    }
+
+    #[test]
     fn a_clean_file_reports_nothing() {
-        let f = style_findings("hello\nworld\n", &StyleCfg::default());
+        let f = style_findings("hello\nworld\n", &StyleCfg::default(), false);
         assert!(f.is_empty(), "{f:?}");
     }
 

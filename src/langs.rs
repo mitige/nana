@@ -109,6 +109,13 @@ impl Lang {
     pub fn compiled(&self) -> bool {
         self.run_build.is_some()
     }
+
+    /// some languages indent with tabs *by convention*: flagging that would be
+    /// flagging the language itself. the convention lives here, with the rest
+    /// of what nana knows about a language.
+    pub fn tabs_by_convention(&self) -> bool {
+        matches!(self.id, "go" | "make" | "asm" | "cobol")
+    }
 }
 
 // conveniences for the long python one-liners
@@ -1100,6 +1107,14 @@ mod tests {
             assert!(!l.line_comment.is_empty(), "{} has no comment token", l.id);
             assert!(!l.tag.is_empty(), "{} has no tag", l.id);
         }
+    }
+
+    #[test]
+    fn tab_indented_languages_say_so() {
+        assert!(by_id("go").unwrap().tabs_by_convention());
+        assert!(by_id("make").unwrap().tabs_by_convention());
+        assert!(!by_id("python").unwrap().tabs_by_convention());
+        assert!(!by_id("c").unwrap().tabs_by_convention());
     }
 
     #[test]
