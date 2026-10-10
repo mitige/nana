@@ -6,18 +6,6 @@ version 2.0.
 
 ![nana, the welcome screen](docs/shots/test1.png)
 
-![nana opens on the hub: nothing of the ide is drawn behind it](docs/shots/hub-start.png)
-
-## 2.0 on screen
-
-captured from the real binary, in a 120×34 terminal. the hub is the only thing
-drawn at start; `esc` gives back the editor, and `f3` or `super+t` opens the
-terminal.
-
-| the hub | the editor | the terminal |
-| --- | --- | --- |
-| ![the hub](docs/screens/hub.png) | ![the editor](docs/screens/editor.png) | ![the terminal](docs/screens/terminal.png) |
-
 ## what it is
 
 nana is a small, fast, keyboard-driven editor for the terminal — and it knows
