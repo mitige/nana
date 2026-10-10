@@ -27,10 +27,12 @@ fn main() {
                 continue;
             };
             let txt = cell.contents();
-            if txt.is_empty() {
+            let (fg, bg) = (color(cell.fgcolor()), color(cell.bgcolor()));
+            // a cell matters if it has text, or a background: a band with no
+            // text under it is exactly what we need to see
+            if txt.is_empty() && bg == "\"d\"" {
                 continue;
             }
-            let (fg, bg) = (color(cell.fgcolor()), color(cell.bgcolor()));
             if !first {
                 out.push(',');
             }

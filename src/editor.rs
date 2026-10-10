@@ -2062,6 +2062,47 @@ fn fill(frame: &mut Frame, area: ratatui::layout::Rect, style: Style) {
     frame.render_widget(Paragraph::new("").style(style), area);
 }
 
+/// Expand tabs for display only. A tab written into one cell makes the
+/// terminal jump: the frame's cursor drifts from the buffer's idea of it and
+/// the screen fills with nonsense. The buffer keeps the real tab; this is
+/// what the eye gets. Width 4, the tab stop of the editor.
+fn expand_tabs(s: &str) -> String {
+    if !s.contains('\t') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut col = 0usize;
+    for ch in s.chars() {
+        if ch == '\t' {
+            let stop = 4 - (col % 4);
+            for _ in 0..stop {
+                out.push(' ');
+            }
+            col += stop;
+        } else {
+            out.push(ch);
+            col += 1;
+        }
+    }
+    out
+}
+
+/// The column a character index lands on, tabs expanded — used for the cursor.
+fn visual_col(s: &str, index: usize) -> usize {
+    let mut col = 0usize;
+    for (i, ch) in s.chars().enumerate() {
+        if i >= index {
+            break;
+        }
+        if ch == '\t' {
+            col += 4 - (col % 4);
+        } else {
+            col += 1;
+        }
+    }
+    col
+}
+
 fn render_line(text: &str, palette_dim: Color, ext: &str) -> Vec<Span<'static>> {
     // coloration par langage (extension du fichier) via syntect — thème Minuit
     let hl = highlight::highlight_code(text, ext);
@@ -2099,7 +2140,9 @@ fn border_for(focused: bool) -> Color {
 
 /// Fond des floats (modal, recherche, toasts, survol) — un demi-ton au-dessus.
 fn float_bg() -> Color {
-    Color::Indexed(0)
+    // the terminal's own background, not a colour of ours: a notification, a
+    // search float or a diagnostic is a window, not a slab of dark blue
+    Color::Reset
 }
 
 /// Give a background band rounded ends: the powerline half-circles sit on the
@@ -2107,11 +2150,26 @@ fn float_bg() -> Color {
 /// turns a selected row from a rectangle into a pill — the same language the
 /// bars already speak.
 fn round_band(buf: &mut ratatui::buffer::Buffer, y: u16, x0: u16, x1: u16, band: Color) {
-    if !icons_enabled() || x1 <= x0 {
+    if x1 <= x0 {
         return;
     }
-    buf[(x0, y)].set_symbol(CAP_L).set_fg(band).set_bg(Ed::bg());
-    buf[(x1, y)].set_symbol(CAP_R).set_fg(band).set_bg(Ed::bg());
+    // paint the whole row first: the widgets only fill the cells they write,
+    // so a band built out of them tears open wherever there is no text — before
+    // a `:=`, on an empty line, in the gap between the gutter and the code.
+    for x in x0..=x1 {
+        buf[(x, y)].set_bg(band);
+    }
+    if !icons_enabled() {
+        return;
+    }
+    // a cap only replaces an empty cell: the name of the file you are hovering
+    // must never lose its last letter to the rounded end
+    for (x, glyph) in [(x0, CAP_L), (x1, CAP_R)] {
+        let cell = &mut buf[(x, y)];
+        if cell.symbol().trim().is_empty() || cell.symbol() == "▎" {
+            cell.set_symbol(glyph).set_fg(band).set_bg(Ed::bg());
+        }
+    }
 }
 
 /// a rounded segment: the label, with a powerline half-circle on each end, so
@@ -2402,16 +2460,9 @@ fn draw_topbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
     }
     // right: the project you are in. the check verdict lives in the status
     // bar only — one fact, one place.
-    let mut right_x = area.right();
-    if let Some(label) = &ed.project_label {
-        let seg = format!(" {label} ");
-        let pad = if icons_enabled() { 2u16 } else { 0 };
-        let w = UnicodeWidthStr::width(seg.as_str()) as u16 + 2 + pad;
-        if right_x > area.x + w + 2 {
-            right_x = right_x.saturating_sub(w);
-            put_pill(buf, right_x, area.y, &seg, Ed::dim(), seg_bg, false);
-        }
-    }
+    // no project label here: it read "make" while you were in a .c file, and
+    // a corner that names the wrong thing is worse than an empty corner. the
+    // kind still drives f5 and f6 — it just does not need a badge.
     // breadcrumb centré : dossier › fichier ●
     if let Some(p) = &ed.file {
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("?");
@@ -2425,37 +2476,30 @@ fn draw_topbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
         };
         let dirty_w = if ed.modified { 2 } else { 0 };
         let icon = file_icon(name, false);
-        let caps = if icons_enabled() { 2 } else { 0 };
-        let total = UnicodeWidthStr::width(crumb.as_str()) as u16 + dirty_w + 2 + caps;
-        let mut x = area.x + area.width.saturating_sub(total) / 2;
-        // the breadcrumb is a rounded chip: no square corner in the middle of
-        // the bar either
-        let chip = Ed::bar_bg();
-        if icons_enabled() {
-            buf[(x, area.y)]
-                .set_symbol(CAP_L)
-                .set_fg(seg_bg)
-                .set_bg(chip);
-            x += 1;
-        }
-        x = put_seg(buf, x, area.y, icon, file_color(name, false), chip, false);
-        x = put_seg(
+        // the breadcrumb sits on the bar itself — no box, no chip, no caps:
+        // just the path, in the middle, where the eye expects a title
+        let total = UnicodeWidthStr::width(crumb.as_str()) as u16 + dirty_w + 2;
+        let cx = area.x + area.width.saturating_sub(total) / 2;
+        let ix = put_seg(
             buf,
-            x,
+            cx,
+            area.y,
+            icon,
+            file_color(name, false),
+            Ed::bar_bg(),
+            false,
+        );
+        let nx = put_seg(
+            buf,
+            ix,
             area.y,
             &format!(" {crumb}"),
             Ed::text(),
-            chip,
+            Ed::bar_bg(),
             false,
         );
         if ed.modified {
-            x = put_seg(buf, x, area.y, " ●", Ed::accent(), chip, false);
-        }
-        if icons_enabled() {
-            buf[(x, area.y)]
-                .set_symbol(CAP_R)
-                .set_fg(seg_bg)
-                .set_bg(chip);
+            put_seg(buf, nx, area.y, " ●", Ed::accent(), Ed::bar_bg(), false);
         }
     }
 }
@@ -2676,20 +2720,14 @@ fn draw_search(frame: &mut Frame, fs: &mut FileSearch, zone: ratatui::layout::Re
         height: inner.height.saturating_sub(2),
         ..inner
     };
-    let widths: Vec<u16> = lines
-        .iter()
-        .map(|l| UnicodeWidthStr::width(l.to_string().as_str()) as u16)
-        .collect();
     frame.render_widget(Paragraph::new(lines), list_area);
     if sel >= start && sel < start + paths.len() {
-        let i = sel - start;
-        let y = list_area.y + i as u16;
-        let w = widths.get(i).copied().unwrap_or(1).max(2);
+        let y = list_area.y + (sel - start) as u16;
         round_band(
             frame.buffer_mut(),
             y,
             list_area.x,
-            (list_area.x + w - 1).min(list_area.right().saturating_sub(1)),
+            list_area.right().saturating_sub(1),
             Ed::sel_row(),
         );
     }
@@ -3082,20 +3120,14 @@ fn draw_explorer(frame: &mut Frame, ex: &mut Explorer, area: ratatui::layout::Re
         .collect();
     // the band of a row stops where its text stops: measure before drawing,
     // otherwise the closing cap floats at the panel edge and the pill breaks
-    let widths: Vec<u16> = lines
-        .iter()
-        .map(|l| UnicodeWidthStr::width(l.to_string().as_str()) as u16)
-        .collect();
     frame.render_widget(Paragraph::new(lines), rows_area);
     if sel >= start && sel < start + visible.len() {
-        let i = sel - start;
-        let y = rows_area.y + i as u16;
-        let w = widths.get(i).copied().unwrap_or(1).max(2);
+        let y = rows_area.y + (sel - start) as u16;
         round_band(
             frame.buffer_mut(),
             y,
             rows_area.x,
-            (rows_area.x + w - 1).min(rows_area.right().saturating_sub(1)),
+            rows_area.right().saturating_sub(1),
             Ed::sel_row(),
         );
     }
@@ -3223,7 +3255,10 @@ fn draw_body(frame: &mut Frame, ed: &Editor, zone: ratatui::layout::Rect) {
             }
             if n < ed.lines.len() {
                 let raw = &ed.lines[n];
-                let visible: String = raw.chars().skip(ed.scroll_x).collect();
+                // tabs are expanded before anything is measured or drawn
+                let expanded = expand_tabs(raw);
+                let start = visual_col(raw, ed.scroll_x);
+                let visible: String = expanded.chars().skip(start).collect();
                 let mut spans = render_line(&visible, Ed::dim(), &ed.ext);
                 // première ligne du fantôme : à la suite de la ligne du curseur
                 if n == ed.cy && ghost_len > 0 {
@@ -3250,16 +3285,13 @@ fn draw_body(frame: &mut Frame, ed: &Editor, zone: ratatui::layout::Rect) {
     // right end sits at the end of the line, not at the edge of the panel
     let cur_row = body[1].y + (ed.cy - ed.scroll_y) as u16;
     if cur_row >= body[1].y && cur_row < body[1].bottom() {
-        let text_w = ed
-            .lines
-            .get(ed.cy)
-            .map(|l| UnicodeWidthStr::width(l.as_str()) as u16)
-            .unwrap_or(0)
-            .saturating_sub(ed.scroll_x as u16);
-        let end = (body[1].x + text_w)
-            .max(body[1].x + 1)
-            .min(body[1].right().saturating_sub(1));
-        round_band(frame.buffer_mut(), cur_row, body[0].x, end, Ed::cur_line());
+        round_band(
+            frame.buffer_mut(),
+            cur_row,
+            body[0].x,
+            body[1].right().saturating_sub(1),
+            Ed::cur_line(),
+        );
     }
 
     // repère subtil à la colonne 80 (la limite de la norme) — un filet discret
@@ -3278,7 +3310,17 @@ fn draw_body(frame: &mut Frame, ed: &Editor, zone: ratatui::layout::Rect) {
     // curseur : seulement quand l'éditeur a le focus (dans l'explorateur,
     // c'est la ligne sélectionnée qui porte le regard)
     if ed.focus == Focus::Editor {
-        let cur_x = body[1].x + (ed.cx - ed.scroll_x) as u16;
+        let col = ed
+            .lines
+            .get(ed.cy)
+            .map(|l| visual_col(l, ed.cx))
+            .unwrap_or(ed.cx);
+        let origin = ed
+            .lines
+            .get(ed.cy)
+            .map(|l| visual_col(l, ed.scroll_x))
+            .unwrap_or(ed.scroll_x);
+        let cur_x = body[1].x + col.saturating_sub(origin) as u16;
         let cur_y = body[1].y + (ed.cy - ed.scroll_y) as u16;
         frame.set_cursor_position((
             cur_x.min(body[1].width.saturating_sub(1) + body[1].x),
@@ -3386,6 +3428,19 @@ fn loop_run(terminal: &mut ratatui::DefaultTerminal, ed: &mut Editor) -> io::Res
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn render_text(ed: &mut Editor, w: u16, h: u16) -> String {
+    let backend = ratatui::backend::TestBackend::new(w, h);
+    let mut term = ratatui::Terminal::new(backend).unwrap();
+    term.draw(|f| draw(f, ed)).unwrap();
+    term.backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect()
 }
 
 #[cfg(test)]
@@ -3740,6 +3795,46 @@ mod pair_tests {
 }
 
 #[cfg(test)]
+mod tab_tests {
+    use super::*;
+
+    #[test]
+    fn a_tab_is_expanded_to_the_next_stop() {
+        assert_eq!(expand_tabs("a\tb"), "a   b");
+        assert_eq!(expand_tabs("abcd\te"), "abcd    e");
+        assert_eq!(expand_tabs("\tx"), "    x");
+        assert_eq!(expand_tabs("no tabs"), "no tabs");
+    }
+
+    #[test]
+    fn the_cursor_column_follows_the_expansion() {
+        assert_eq!(visual_col("a\tb", 1), 1);
+        assert_eq!(visual_col("a\tb", 2), 4);
+        assert_eq!(visual_col("ab\tc", 3), 4);
+        assert_eq!(visual_col("plain", 3), 3);
+    }
+
+    /// A tab must never reach a cell: the terminal would move its own cursor
+    /// and the whole frame would drift — this is the makefile glitch.
+    #[test]
+    fn no_cell_ever_holds_a_tab() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.lines = vec![
+            "NAME\t\t:= tesseract".to_string(),
+            "\t$(CC) -o $@ $<".to_string(),
+            "plain".to_string(),
+        ];
+        ed.file = Some(std::path::PathBuf::from("Makefile"));
+        ed.ext = "mk".into();
+        ed.modified = true;
+        let text = render_text(&mut ed, 100, 20);
+        assert!(!text.contains('\t'), "a tab survived into the frame");
+        assert!(text.contains("NAME        := tesseract"), "aligned: {text}");
+        assert!(text.contains("$(CC) -o $@ $<"), "the recipe is readable");
+    }
+}
+
+#[cfg(test)]
 mod diag_tests {
     use super::*;
 
@@ -3909,17 +4004,6 @@ mod diag_tests {
     }
 
     /// Cadre de test : dessine l'UI sur un backend virtuel, retourne le texte.
-    fn render_text(ed: &mut Editor, w: u16, h: u16) -> String {
-        let backend = ratatui::backend::TestBackend::new(w, h);
-        let mut term = ratatui::Terminal::new(backend).unwrap();
-        term.draw(|f| draw(f, ed)).unwrap();
-        term.backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect()
-    }
 
     /// L'accueil est une boîte arrondie façon lazy.nvim — et ne mentionne
     /// plus jamais rien d'autre que les gestes.

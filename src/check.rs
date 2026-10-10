@@ -181,17 +181,16 @@ pub fn check_path(path: &Path, cfg: &StyleCfg) -> Report {
         .filter(|f| f.severity == Severity::Major)
         .count();
     let minor = findings.len() - major;
+    // the language is already the badge on the left: this only has to say
+    // whether the norm holds, so it never repeats the name
     let note = if !tool_note.is_empty() && findings.is_empty() {
         tool_note
     } else if findings.is_empty() {
-        match lang.check {
-            Some(_) => format!("{} ✓", lang.name),
-            None => format!("{} ✓", lang.name),
-        }
+        "norm ✓".to_string()
     } else if major == 0 {
-        format!("{}: {minor} note(s)", lang.name)
+        format!("norm: {minor} note(s)")
     } else {
-        format!("{}: {major} error(s), {minor} note(s)", lang.name)
+        format!("norm: {major} error(s), {minor} note(s)")
     };
 
     Report {
@@ -257,7 +256,7 @@ mod tests {
         std::fs::write(&p, "just text\n").unwrap();
         let rep = check_path(&p, &StyleCfg::default());
         assert!(rep.findings.is_empty());
-        assert!(rep.note.contains("text"));
+        assert!(!rep.note.is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
