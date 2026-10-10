@@ -288,8 +288,13 @@ impl Agent {
                     name: call.name.clone(),
                     args: call.args.clone(),
                 });
-                if let Some((path, content, write)) = file_event(&call.name, &call.args) {
-                    on(Event::File { path, content, write });
+                if let Some((path, content, write)) = file_event(&call.name, &call.args, &self.ctx)
+                {
+                    on(Event::File {
+                        path,
+                        content,
+                        write,
+                    });
                 }
                 let result = tools::run(&call.name, &call.args, &self.ctx);
                 let (ok, text) = match result {
@@ -342,13 +347,21 @@ impl Agent {
 
 /// the file a tool is about to touch, with the text it will write. only the
 /// writes are shown before they land: a read shows what the tool returns.
-fn file_event(name: &str, args: &Value) -> Option<(String, String, bool)> {
+fn file_event(name: &str, args: &Value, ctx: &crate::tools::Ctx) -> Option<(String, String, bool)> {
     match name {
         "write_file" => Some((
             args.get("path")?.as_str()?.to_string(),
             args.get("content")?.as_str()?.to_string(),
             true,
         )),
+        // a read shows the file as it is now, before the tool runs, through the
+        // same path check as the tool: a sandboxed read is never shown either
+        "read_file" => {
+            let raw = args.get("path")?.as_str()?;
+            let path = crate::tools::resolve(ctx, raw).ok()?;
+            let text = std::fs::read_to_string(&path).ok()?;
+            Some((raw.to_string(), text, false))
+        }
         _ => None,
     }
 }
@@ -520,7 +533,10 @@ mod tests {
             Client::local("http://127.0.0.1:1", "m"),
         );
         let p = a.system_prompt("refactor the parser");
-        assert!(p.contains("world model"), "memory is not framed as a model: {p}");
+        assert!(
+            p.contains("world model"),
+            "memory is not framed as a model: {p}"
+        );
         assert!(p.contains("expect"), "no expectation before acting: {p}");
         assert!(
             p.contains("correct the page"),
@@ -624,11 +640,49 @@ mod tests {
         let file = events
             .iter()
             .find_map(|e| match e {
-                Event::File { path, content, write } => Some((path.clone(), content.clone(), *write)),
+                Event::File {
+                    path,
+                    content,
+                    write,
+                } => Some((path.clone(), content.clone(), *write)),
                 _ => None,
             })
             .expect("the write is announced");
         assert_eq!(file, ("src/new.rs".to_string(), body.to_string(), true));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_file_read_is_announced_with_the_text_it_read() {
+        let d = tmp("live-read");
+        std::fs::write(d.join("notes.txt"), "alpha\nbeta\n").unwrap();
+        let args = serde_json::json!({"path": "notes.txt"}).to_string();
+        let reply = serde_json::json!({"choices":[{"message":{"content":"","tool_calls":[
+            {"id":"c1","type":"function","function":{"name":"read_file","arguments": args}}]}}]})
+        .to_string();
+        let (url, server) = scripted(vec![
+            reply,
+            r#"{"choices":[{"message":{"content":"done"}}]}"#.to_string(),
+        ]);
+        let mut a = agent_at(&d, &url);
+        let mut events = Vec::new();
+        a.run("read it", |e| events.push(e)).unwrap();
+        let _ = server.join();
+        let file = events
+            .iter()
+            .find_map(|e| match e {
+                Event::File {
+                    path,
+                    content,
+                    write,
+                } => Some((path.clone(), content.clone(), *write)),
+                _ => None,
+            })
+            .expect("the read is announced, like a write");
+        assert_eq!(
+            file,
+            ("notes.txt".to_string(), "alpha\nbeta\n".to_string(), false)
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

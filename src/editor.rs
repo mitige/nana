@@ -332,6 +332,10 @@ struct AgentPane {
     persona: Option<String>,
     /// file writes announced by the agent, drained by the editor each frame
     writes: Vec<LiveWrite>,
+    /// every action of this conversation, placed in time: the background of the card
+    trail: Vec<crate::trail::Step>,
+    /// when the card opened: the trail's clock starts here
+    started: std::time::Instant,
 }
 
 impl AgentPane {
@@ -348,7 +352,20 @@ impl AgentPane {
             status: String::new(),
             persona: None,
             writes: Vec::new(),
+            trail: Vec::new(),
+            started: std::time::Instant::now(),
         }
+    }
+
+    /// one action on the trail, stamped with the time since the card opened.
+    fn record(&mut self, lane: crate::trail::Lane, label: String, ok: bool) {
+        let at = self.started.elapsed().as_secs_f32();
+        self.trail.push(crate::trail::Step {
+            lane,
+            label,
+            at,
+            ok,
+        });
     }
 
     /// start a request on a worker thread; the events come back one by one.
@@ -382,7 +399,7 @@ impl AgentPane {
 
     /// fold whatever the worker produced since the last frame.
     fn poll(&mut self) {
-        let Some(rx) = &self.rx else {
+        let Some(rx) = self.rx.take() else {
             return;
         };
         let mut done = false;
@@ -393,22 +410,38 @@ impl AgentPane {
                 } => {
                     self.status = format!("{model} via {provider}");
                 }
-                crate::agent::Event::Text(t) => self.lines.push(("agent".into(), t)),
-                crate::agent::Event::ToolCall { name, args } => self
-                    .lines
-                    .push(("tool".into(), format!("{name} {}", short_json(&args)))),
-                crate::agent::Event::ToolResult { name, ok, text } => self.lines.push((
-                    if ok { "ok".into() } else { "refused".into() },
-                    format!("{name}: {}", text.trim()),
-                )),
-                crate::agent::Event::File { path, content, write } => {
-                    if write {
-                        self.writes.push(LiveWrite {
-                            path: PathBuf::from(&path),
-                            text: content.lines().map(str::to_string).collect(),
-                            shown: 0,
-                        });
-                    }
+                crate::agent::Event::Text(t) => {
+                    self.record(crate::trail::Lane::Say, t.clone(), true);
+                    self.lines.push(("agent".into(), t));
+                }
+                crate::agent::Event::ToolCall { name, args } => {
+                    let label = format!("{name} {}", short_json(&args));
+                    self.record(crate::trail::Lane::Tool, label.clone(), true);
+                    self.lines.push(("tool".into(), label));
+                }
+                crate::agent::Event::ToolResult { name, ok, text } => {
+                    self.record(
+                        crate::trail::Lane::Result,
+                        format!("{name}: {}", text.trim()),
+                        ok,
+                    );
+                    self.lines.push((
+                        if ok { "ok".into() } else { "refused".into() },
+                        format!("{name}: {}", text.trim()),
+                    ));
+                }
+                crate::agent::Event::File {
+                    path,
+                    content,
+                    write,
+                } => {
+                    self.record(crate::trail::Lane::File, path.clone(), true);
+                    self.writes.push(LiveWrite {
+                        path: PathBuf::from(&path),
+                        text: content.lines().map(str::to_string).collect(),
+                        shown: 0,
+                        write,
+                    });
                     self.lines.push(("file".into(), path));
                 }
                 crate::agent::Event::Finished { steps } => {
@@ -416,15 +449,17 @@ impl AgentPane {
                     done = true;
                 }
                 crate::agent::Event::Error(e) => {
+                    self.record(crate::trail::Lane::Result, e.clone(), false);
                     self.lines.push(("error".into(), e));
                     self.status = "failed".into();
                     done = true;
                 }
             }
         }
-        if done {
+        if !done {
+            self.rx = Some(rx);
+        } else {
             self.busy = false;
-            self.rx = None;
         }
     }
 }
@@ -439,6 +474,18 @@ fn short_json(v: &serde_json::Value) -> String {
     }
 }
 
+/// the agent's view: the file it is writing or reading, line by line, with its
+/// own cursor. it is a separate buffer from the user's, so neither overrides
+/// the other.
+#[derive(Debug, Clone, Default)]
+struct AgentView {
+    path: Option<PathBuf>,
+    lines: Vec<String>,
+    cy: usize,
+    cx: usize,
+    write: bool,
+}
+
 /// a write in progress, played back: the text the agent is putting in a file,
 /// and how many of its lines are on screen so far.
 #[derive(Debug, Clone)]
@@ -446,6 +493,8 @@ struct LiveWrite {
     path: PathBuf,
     text: Vec<String>,
     shown: usize,
+    /// false for a read: the buffer shows the file, it is not changed by it
+    write: bool,
 }
 
 /// Niveau d'une notification toast.
@@ -515,6 +564,9 @@ pub struct Editor {
     /// writes the agent announced, played back one line per step; the first is
     /// the one on screen
     live: Vec<LiveWrite>,
+    /// the agent's own view of the file it writes or reads: a buffer and a
+    /// cursor of its own, drawn in the agent column, never in the user's buffer
+    agent_view: AgentView,
     /// the hub (^w): the boxes — memory, providers, skills, personas, agents
     hub: Option<crate::hub::Hub>,
     /// explorateur de fichiers (^T, ou `c-nano <dossier>`)
@@ -675,6 +727,7 @@ impl Editor {
             ai: None,
             agent_pane: None,
             live: Vec::new(),
+            agent_view: AgentView::default(),
             hub: None,
             explorer: None,
             search: None,
@@ -1203,22 +1256,29 @@ impl Editor {
         let Some(w) = self.live.first_mut() else {
             return;
         };
+        // the agent's text goes to the agent's own view. the user's buffer,
+        // its file, its cursor and its unsaved work are never touched here.
         if w.shown == 0 {
-            self.file = Some(w.path.clone());
-            self.lines.clear();
-            self.modified = false;
+            self.agent_view = AgentView {
+                path: Some(w.path.clone()),
+                lines: Vec::new(),
+                cy: 0,
+                cx: 0,
+                write: w.write,
+            };
         }
         if w.shown < w.text.len() {
-            self.lines.push(w.text[w.shown].clone());
+            self.agent_view.lines.push(w.text[w.shown].clone());
             w.shown += 1;
-            self.cy = self.lines.len() - 1;
-            self.cx = self.lines[self.cy].chars().count();
+            self.agent_view.cy = self.agent_view.lines.len() - 1;
+            self.agent_view.cx = self.agent_view.lines[self.agent_view.cy]
+                .chars()
+                .count();
         }
         if w.shown >= w.text.len() {
-            if self.lines.is_empty() {
-                self.lines.push(String::new());
+            if self.agent_view.lines.is_empty() {
+                self.agent_view.lines.push(String::new());
             }
-            self.saved = self.lines.clone();
             self.live.remove(0);
         }
     }
@@ -1357,7 +1417,11 @@ impl Editor {
     fn animating(&self) -> bool {
         !self.live.is_empty()
             || self.busy().is_some()
-            || self.hub.as_ref().map(|h| h.busy.is_some()).unwrap_or(false)
+            || self
+                .hub
+                .as_ref()
+                .map(|h| h.busy.is_some() || h.sweep_progress().is_some())
+                .unwrap_or(false)
             || !self.toasts.is_empty()
             || self.status_age() < STATUS_TTL
             || self
@@ -2965,9 +3029,10 @@ fn draw(frame: &mut Frame, ed: &mut Editor) {
         draw_toasts(frame, ed, area);
         return;
     }
-    if let Some(pane) = &mut ed.agent_pane {
-        clear_area(frame, area);
-        draw_agent(frame, pane, area);
+    // the agent is a column of its own beside the editor, never a card drawn
+    // over it: the user's buffer and the agent's view are both on screen
+    if ed.agent_pane.is_some() {
+        draw_agent_column(frame, ed, area);
         draw_toasts(frame, ed, area);
         return;
     }
@@ -3353,7 +3418,14 @@ fn draw_hub(frame: &mut Frame, hub: &mut crate::hub::Hub, zone: ratatui::layout:
         &[(format!(" {hint} "), Ed::dim())],
         Ed::gutter(),
     );
-    let body: Vec<Line> = wrap(hub.detail(), inner.width.saturating_sub(2) as usize)
+    // while the map sweeps, the sweep's own frame is what the card shows
+    let detail = match (hub.current(), hub.sweep_progress()) {
+        (crate::hub::Section::World, Some(p)) => {
+            crate::world::render_sweep(&hub.root, hub.selected().map(|i| &i.action), p)
+        }
+        _ => hub.detail().to_string(),
+    };
+    let body: Vec<Line> = wrap(&detail, inner.width.saturating_sub(2) as usize)
         .into_iter()
         .take(inner.height as usize)
         .map(|l| {
@@ -3364,6 +3436,108 @@ fn draw_hub(frame: &mut Frame, hub: &mut crate::hub::Hub, zone: ratatui::layout:
         })
         .collect();
     frame.render_widget(Paragraph::new(body), inner);
+}
+
+/// the screen with the agent open: the ide on the left, the agent's column on
+/// the right. each side is drawn by its own code and reads its own buffer, so
+/// the user's text and the agent's text sit side by side and never override.
+fn draw_agent_column(frame: &mut Frame, ed: &mut Editor, area: ratatui::layout::Rect) {
+    fill(frame, area, Style::default().bg(Ed::bg()));
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(30), Constraint::Length(1), Constraint::Min(30)])
+        .split(area);
+    let ide = cols[0];
+    let agent = cols[2];
+    let inner = draw_box(frame, ide, &[], border_for(ed.focus == Focus::Editor));
+    draw_body(frame, ed, inner);
+    if let Some(pane) = &mut ed.agent_pane {
+        draw_agent_view(frame, &ed.agent_view, agent);
+        draw_agent(frame, pane, agent);
+        // the trail sits in the band under the centred card, where the file
+        // view is not needed; a band too short for it is simply left blank
+        let card_h = agent.height.saturating_sub(4).min(20);
+        let card_bottom = agent.y + (agent.height - card_h) / 2 + card_h;
+        let band = ratatui::layout::Rect {
+            x: agent.x,
+            y: card_bottom,
+            width: agent.width,
+            height: (agent.y + agent.height).saturating_sub(card_bottom),
+        };
+        clear_area(frame, band);
+        draw_trail(frame, pane, band);
+    }
+}
+
+/// the agent's own view of its file: its lines and its cursor, in its own box,
+/// separate from the user's buffer.
+fn draw_agent_view(frame: &mut Frame, view: &AgentView, zone: ratatui::layout::Rect) {
+    let verb = if view.write { "write" } else { "read" };
+    let title = match &view.path {
+        Some(p) => format!(" nana · {verb} {} ", p.display()),
+        None => " nana ".to_string(),
+    };
+    let inner = draw_box(frame, zone, &[(title, Ed::cyan())], Ed::cyan());
+    let h = inner.height as usize;
+    let start = view.cy.saturating_sub(h.saturating_sub(1));
+    let lines: Vec<Line> = view
+        .lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(h)
+        .map(|(i, text)| {
+            let cur = i == view.cy;
+            Line::from(vec![
+                Span::styled(
+                    format!("{:>4} ", i + 1),
+                    Style::default().fg(if cur { Ed::text() } else { Ed::gutter() }),
+                ),
+                Span::styled(clip(text, inner.width.saturating_sub(5) as usize), Style::default().fg(Ed::text())),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// the agent's trail, drawn behind its card: one row per lane over the time of
+/// the conversation, then the steps as a list. the ide is not drawn here, the
+/// screen is the agent's own record of what it did.
+fn draw_trail(frame: &mut Frame, pane: &AgentPane, zone: ratatui::layout::Rect) {
+    if zone.width < 20 || zone.height < 6 {
+        return;
+    }
+    let inner_w = zone.width.saturating_sub(4) as usize;
+    let columns = inner_w.saturating_sub(12).clamp(2, 72);
+    let mut out: Vec<Line> = Vec::new();
+    out.push(Line::from(Span::styled(
+        "agent trail — time runs left to right, now on the right",
+        Style::default().fg(Ed::dim()),
+    )));
+    out.push(Line::from(""));
+    for (lane, row) in crate::trail::rows(&pane.trail, columns) {
+        let glyphs: String = row.into_iter().collect();
+        out.push(Line::from(vec![
+            Span::styled(
+                format!("{:<9}", lane.id()),
+                Style::default().fg(Ed::gutter()),
+            ),
+            Span::styled(glyphs, Style::default().fg(Ed::cyan())),
+        ]));
+    }
+    for line in crate::trail::lines(&pane.trail).into_iter().rev() {
+        out.push(Line::from(Span::styled(
+            clip(&line, inner_w),
+            Style::default().fg(Ed::dim()),
+        )));
+    }
+    let rect = ratatui::layout::Rect {
+        x: zone.x + 2,
+        y: zone.y + 1,
+        width: zone.width.saturating_sub(4),
+        height: zone.height.saturating_sub(2),
+    };
+    frame.render_widget(Paragraph::new(out), rect);
 }
 
 fn draw_agent(frame: &mut Frame, pane: &mut AgentPane, zone: ratatui::layout::Rect) {
@@ -5296,34 +5470,29 @@ mod hub_ui_tests {
 mod float_tests {
     use super::*;
 
-    /// A floating card erases what it covers: no code bleeding through the
-    /// text of the card. Transparency is the terminal's background, not a
-    /// window onto the editor.
+    /// the agent card does not paint over the user's text: the editor is drawn
+    /// in its own column, and the agent card sits in the other one.
     #[test]
-    fn a_card_erases_the_text_under_it() {
+    fn the_agent_card_never_paints_over_the_user_text() {
         let mut ed = Editor::open(None).unwrap();
         ed.lines = (0..20)
-            .map(|i| format!("SECRET_LINE_{i}_SHOULD_NOT_SHOW_THROUGH"))
+            .map(|i| format!("SECRET_LINE_{i}_SHOULD_SHOW_IN_IDE"))
             .collect();
         ed.file = Some(std::path::PathBuf::from("x.py"));
         ed.ext = "py".into();
         ed.modified = true;
         ed.agent_pane = Some(AgentPane::new());
-        let text = render_text(&mut ed, 100, 30);
-        // everything between the card's top border and its bottom one
-        let start = text.find("╭─ agent").expect("the card is drawn");
-        let rest = &text[start..];
-        let end = rest.find('╯').expect("a bottom border") + '╯'.len_utf8();
-        let card = &rest[..end];
+        let rows = render_rows(&mut ed, 160, 40);
+        let card_row = rows
+            .iter()
+            .position(|r| r.contains("╭─ agent"))
+            .expect("the card is drawn");
+        let text = rows.join("\n");
         assert!(
-            !card.contains("SECRET_LINE"),
-            "the editor shows through the card:\n{card}"
+            text.contains("SECRET_LINE_0_SHOULD_SHOW_IN_IDE"),
+            "the user's text is still on screen beside the agent:\n{text}"
         );
-        // the menu is a window of its own: the ide is not drawn around it either
-        assert!(
-            !text.contains("SECRET_LINE"),
-            "the ide is drawn around the card:\n{text}"
-        );
+        assert!(card_row > 0);
     }
 
     /// the search is a window on its own too: the editor behind it must not
@@ -5346,22 +5515,43 @@ mod float_tests {
         );
     }
 
-    /// the agent menu is a window on its own, like the hub: the editor behind
-    /// it must not show anywhere on the screen, not just under the card.
+    /// the agent's trail is still listed for the user, and the ide stays on
+    /// screen beside the card: nothing is erased to show what the agent did.
     #[test]
-    fn the_agent_menu_shows_nothing_of_the_ide_around_it() {
+    fn the_agent_trail_is_listed_and_the_ide_stays_visible() {
         let mut ed = Editor::open(None).unwrap();
         ed.lines = (0..20)
-            .map(|i| format!("SECRET_LINE_{i}_SHOULD_NOT_SHOW_THROUGH"))
+            .map(|i| format!("SECRET_LINE_{i}_STAYS_VISIBLE"))
             .collect();
         ed.file = Some(std::path::PathBuf::from("x.py"));
         ed.ext = "py".into();
-        ed.agent_pane = Some(AgentPane::new());
-        let text = render_text(&mut ed, 100, 30);
-        assert!(text.contains("╭─ agent"), "the menu is drawn");
+        let mut pane = AgentPane::new();
+        pane.trail.push(crate::trail::Step {
+            lane: crate::trail::Lane::Tool,
+            label: "read_file src/main.rs".into(),
+            at: 0.0,
+            ok: true,
+        });
+        pane.trail.push(crate::trail::Step {
+            lane: crate::trail::Lane::Result,
+            label: "write_file: done".into(),
+            at: 2.0,
+            ok: true,
+        });
+        ed.agent_pane = Some(pane);
+        let text = render_text(&mut ed, 160, 40);
+        assert!(text.contains("╭─ agent"), "the card is drawn");
         assert!(
-            !text.contains("SECRET_LINE"),
-            "the ide shows around the agent menu:\n{text}"
+            text.contains("SECRET_LINE_0_STAYS_VISIBLE"),
+            "the ide stays on screen:\n{text}"
+        );
+        assert!(
+            text.contains("tool "),
+            "the trail lanes are still drawn:\n{text}"
+        );
+        assert!(
+            text.contains("read_file src/main.rs"),
+            "the actions are listed:\n{text}"
         );
     }
 }
@@ -6035,14 +6225,31 @@ mod hub_hover_tests {
         let buf = term.backend().buffer().clone();
         let _ = std::fs::remove_dir_all(&d);
         let row = (0..buf.area.height)
-            .find(|&y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>().contains("project: stack"))
+            .find(|&y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("project: stack")
+            })
             .expect("the selected row is drawn");
         let start = (0..buf.area.width)
             .find(|&x| buf[(x, row)].symbol() == "p")
             .unwrap();
-        assert_eq!(buf[(start, row)].bg, Ed::hover(), "the label sits on the hover band");
-        assert_eq!(buf[(start + 10, row)].bg, Ed::hover(), "the band runs under the name");
-        assert_ne!(Ed::hover(), Ed::sel_row(), "the hover is not the invisible black");
+        assert_eq!(
+            buf[(start, row)].bg,
+            Ed::hover(),
+            "the label sits on the hover band"
+        );
+        assert_eq!(
+            buf[(start + 10, row)].bg,
+            Ed::hover(),
+            "the band runs under the name"
+        );
+        assert_ne!(
+            Ed::hover(),
+            Ed::sel_row(),
+            "the hover is not the invisible black"
+        );
     }
 }
 
@@ -6050,32 +6257,172 @@ mod hub_hover_tests {
 mod live_write_tests {
     use super::*;
 
-    /// the agent's write shows up in the editor behind its card, one line per
-    /// step: the user watches the file grow, it does not appear all at once.
+    /// the agent's write is played one line at a time in the agent's own view,
+    /// beside the user's buffer. the user's buffer is never written by it.
     #[test]
-    fn a_write_is_played_one_line_at_a_time_in_the_editor() {
+    fn a_write_is_played_one_line_at_a_time_beside_the_user_buffer() {
         let d = scratch("live");
         let target = d.join("new.rs");
         let mut ed = Editor::open(None).unwrap();
-        ed.file = Some(target.clone());
+        ed.file = Some(d.join("mine.rs"));
+        ed.lines = vec!["my own line".into()];
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: target.clone(),
+            text: vec![
+                "fn one() {}".into(),
+                "fn two() {}".into(),
+                "fn three() {}".into(),
+            ],
+            shown: 0,
+            write: true,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        assert_eq!(ed.live.len(), 1, "the write is taken over by the agent view");
+        ed.play_live();
+        let text = render_text(&mut ed, 160, 40);
+        assert!(text.contains("fn one() {}"), "one line after one step");
+        assert!(!text.contains("fn two() {}"), "one line at a time");
+        ed.play_live();
+        ed.play_live();
+        ed.play_live();
+        let text = render_text(&mut ed, 160, 40);
+        assert!(text.contains("fn three() {}"), "the file is whole on screen");
+        assert_eq!(
+            ed.lines,
+            vec!["my own line".to_string()],
+            "the user's buffer is never written by the agent"
+        );
+        assert!(!ed.modified, "the user's buffer is not marked as edited");
+        assert!(ed.live.is_empty(), "the playback is over");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// the user's text and the agent's text are both on screen at once: the
+    /// agent column sits beside the editor, neither one overrides the other.
+    #[test]
+    fn the_user_text_and_the_agent_text_are_on_screen_together() {
+        let d = scratch("live-side");
+        let mut ed = Editor::open(None).unwrap();
+        ed.file = Some(d.join("mine.rs"));
+        ed.lines = vec!["USER_TEXT_STAYS".into()];
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: d.join("new.rs"),
+            text: vec!["AGENT_TEXT_SHOWS".into()],
+            shown: 0,
+            write: true,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        ed.play_live();
+        let rows = render_rows(&mut ed, 160, 40);
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("USER_TEXT_STAYS") || r.contains("AGENT_TEXT_SHOWS")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("USER_TEXT_STAYS") && r.contains("AGENT_TEXT_SHOWS")),
+            "the two views are side by side on one row:\n{}",
+            rows.join("\n")
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// a read is shown the same way, line by line, but it changes nothing: the
+    /// file is not saved again and the buffer is not marked as edited.
+    #[test]
+    fn a_read_is_shown_line_by_line_and_changes_nothing() {
+        let d = scratch("live-read-show");
+        let target = d.join("notes.txt");
+        let mut ed = Editor::open(None).unwrap();
+        ed.file = Some(d.join("other.txt"));
         ed.lines = vec![String::new()];
         let mut pane = AgentPane::new();
         pane.writes.push(LiveWrite {
             path: target.clone(),
-            text: vec!["fn one() {}".into(), "fn two() {}".into(), "fn three() {}".into()],
+            text: vec!["alpha".into(), "beta".into()],
             shown: 0,
+            write: false,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
-        assert_eq!(ed.live.len(), 1, "the write is taken over by the editor");
         ed.play_live();
-        assert_eq!(ed.lines, vec!["fn one() {}".to_string()], "one line after one step");
+        assert_eq!(
+            ed.agent_view.lines,
+            vec!["alpha".to_string()],
+            "the read appears one line at a time in the agent view"
+        );
         ed.play_live();
-        assert_eq!(ed.lines.len(), 2, "the next step adds the next line");
         ed.play_live();
+        assert_eq!(ed.agent_view.lines.len(), 2);
+        assert!(ed.live.is_empty(), "the read is over");
+        assert_eq!(
+            ed.lines,
+            vec![String::new()],
+            "the user's buffer is untouched by the read"
+        );
+        assert!(!ed.modified, "a read is not an edit");
+        assert_ne!(
+            ed.saved, ed.agent_view.lines,
+            "a read does not write its text as the saved state"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// the agent's view says whether it is writing the file or reading it, so
+    /// the same lines never look like an edit when they are only a read.
+    #[test]
+    fn the_agent_view_names_a_read_apart_from_a_write() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.agent_pane = Some(AgentPane::new());
+        ed.agent_view = AgentView {
+            path: Some(PathBuf::from("notes.txt")),
+            lines: vec!["alpha".into()],
+            cy: 0,
+            cx: 0,
+            write: false,
+        };
+        let text = render_text(&mut ed, 160, 40);
+        assert!(text.contains("read"), "a read is named:\n{text}");
+        ed.agent_view.write = true;
+        let text = render_text(&mut ed, 160, 40);
+        assert!(text.contains("write"), "a write is named:\n{text}");
+    }
+
+    /// the user's unsaved work is never replaced by something the agent read.
+    #[test]
+    fn a_read_does_not_replace_unsaved_work() {
+        let d = scratch("live-read-guard");
+        let mut ed = Editor::open(None).unwrap();
+        ed.file = Some(d.join("mine.txt"));
+        ed.lines = vec!["my unsaved line".into()];
+        ed.modified = true;
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: d.join("theirs.txt"),
+            text: vec!["something else".into()],
+            shown: 0,
+            write: false,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
         ed.play_live();
-        assert_eq!(ed.lines.len(), 3, "the file is complete and then the playback ends");
-        assert!(ed.live.is_empty(), "the playback is over");
+        assert_eq!(
+            ed.lines,
+            vec!["my unsaved line".to_string()],
+            "the buffer is untouched"
+        );
+        assert!(ed.modified, "the edit is still marked as unsaved");
+        assert!(ed.live.is_empty(), "the read is played in the agent view");
+        assert_eq!(
+            ed.agent_view.lines,
+            vec!["something else".to_string()],
+            "the agent sees its own read, the user keeps their work"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

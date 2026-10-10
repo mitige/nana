@@ -95,6 +95,46 @@ pub fn iso(day: i64) -> String {
     iso_from_days(day)
 }
 
+/// the sweep's easing: it leaves fast and settles on today, like a hand
+/// that finds its place. `t` is the progress from 0 (start) to 1 (done).
+pub fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// the map at a moment of its sweep: the playhead has crossed the columns up
+/// to `progress`, and only the pages it has passed are drawn. the lanes stay
+/// visible, so the map grows out of its own skeleton instead of popping in.
+pub fn render_sweep(root: &Path, selected: Option<&crate::hub::Action>, progress: f32) -> String {
+    if progress >= 1.0 {
+        return render(root, selected);
+    }
+    let all = nodes(root);
+    if all.is_empty() {
+        return render(root, selected);
+    }
+    let lanes = place(&all, COLUMNS);
+    let head = (ease_out(progress) * (COLUMNS - 1) as f32).round() as usize;
+    let mut out = String::new();
+    out.push_str(&format!("{:<11}{}\n", "", axis()));
+    for lane in &lanes {
+        let mut row = vec!['┄'; COLUMNS];
+        for m in lane.marks.iter().filter(|m| m.col <= head) {
+            let n = &all[m.node];
+            row[m.col] = if n.stale { '◌' } else { glyph(n.confidence) };
+        }
+        if head < COLUMNS {
+            row[head] = '│';
+        }
+        out.push_str(&format!(
+            "{:<11}{}\n",
+            lane.class.id(),
+            row.iter().collect::<String>()
+        ));
+    }
+    out
+}
+
 /// the map as text, for the detail pane: one row per lane, the axis on top, and
 /// the page you selected drawn as a diamond so you can find it on the map.
 pub fn render(root: &Path, selected: Option<&crate::hub::Action>) -> String {
@@ -104,7 +144,9 @@ pub fn render(root: &Path, selected: Option<&crate::hub::Action>) -> String {
     }
     let lanes = place(&all, COLUMNS);
     let picked = selected.and_then(|a| match a {
-        crate::hub::Action::ReadMemory(c, n) => all.iter().position(|x| x.class == *c && x.name == *n),
+        crate::hub::Action::ReadMemory(c, n) => {
+            all.iter().position(|x| x.class == *c && x.name == *n)
+        }
         _ => None,
     });
     let mut out = String::new();
@@ -121,7 +163,11 @@ pub fn render(root: &Path, selected: Option<&crate::hub::Action>) -> String {
                 glyph(n.confidence)
             };
         }
-        out.push_str(&format!("{:<11}{}\n", lane.class.id(), row.iter().collect::<String>()));
+        out.push_str(&format!(
+            "{:<11}{}\n",
+            lane.class.id(),
+            row.iter().collect::<String>()
+        ));
     }
     out.push('\n');
     if let Some(i) = picked {
@@ -192,8 +238,16 @@ mod tests {
         let cols = 40;
         let lanes = place(&nodes, cols);
         let project = lanes.iter().find(|l| l.class == Class::Project).unwrap();
-        let old = project.marks.iter().find(|m| nodes[m.node].name == "old").unwrap();
-        let new = project.marks.iter().find(|m| nodes[m.node].name == "new").unwrap();
+        let old = project
+            .marks
+            .iter()
+            .find(|m| nodes[m.node].name == "old")
+            .unwrap();
+        let new = project
+            .marks
+            .iter()
+            .find(|m| nodes[m.node].name == "new")
+            .unwrap();
         assert_eq!(old.col, 0, "the oldest page starts the axis");
         assert_eq!(new.col, cols - 1, "today is the right edge");
     }
@@ -207,7 +261,11 @@ mod tests {
         ];
         let lanes = place(&nodes, 25);
         let lane = lanes.iter().find(|l| l.class == Class::Reference).unwrap();
-        let undated = lane.marks.iter().find(|m| nodes[m.node].name == "undated").unwrap();
+        let undated = lane
+            .marks
+            .iter()
+            .find(|m| nodes[m.node].name == "undated")
+            .unwrap();
         assert_eq!(undated.col, 0);
     }
 
@@ -225,16 +283,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join(".nana")).unwrap();
         let m = Memory::open(&d);
-        m.write_rated(Class::User, "tone", "blunt", Confidence::High).unwrap();
-        m.write_rated(Class::Project, "stack", "rust", Confidence::Low).unwrap();
+        m.write_rated(Class::User, "tone", "blunt", Confidence::High)
+            .unwrap();
+        m.write_rated(Class::Project, "stack", "rust", Confidence::Low)
+            .unwrap();
         let picked = crate::hub::Action::ReadMemory(Class::User, "tone".into());
         let text = render(&d, Some(&picked));
         let user_row = text.lines().find(|l| l.starts_with("user")).unwrap();
         assert!(user_row.contains('◆'), "{user_row}");
-        assert!(!text.contains("legend"), "the legend yields to the selection");
+        assert!(
+            !text.contains("legend"),
+            "the legend yields to the selection"
+        );
         assert!(text.contains("tone ·") && text.contains("high"), "{text}");
         let idle = render(&d, None);
         assert!(idle.contains("legend"), "{idle}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_sweep_eases_from_nothing_to_the_whole_map() {
+        assert_eq!(ease_out(0.0), 0.0);
+        assert_eq!(ease_out(1.0), 1.0);
+        assert_eq!(ease_out(-3.0), 0.0, "time before the start is clamped");
+        let mut last = 0.0;
+        for i in 1..=20 {
+            let v = ease_out(i as f32 / 20.0);
+            assert!(v >= last, "the sweep never runs backwards");
+            last = v;
+        }
+        assert!(ease_out(0.5) > 0.5, "it starts fast and settles on today");
+    }
+
+    #[test]
+    fn the_playhead_reveals_pages_as_it_passes_them() {
+        let d = std::env::temp_dir().join(format!("nana-world-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".nana")).unwrap();
+        let m = Memory::open(&d);
+        m.write_rated(Class::Project, "stack", "rust", Confidence::High)
+            .unwrap();
+        // the page is dated today, so it sits on the right edge of the map
+        let start = render_sweep(&d, None, 0.0);
+        assert!(
+            !start.contains('◉'),
+            "nothing is revealed before the sweep moves: {start}"
+        );
+        let end = render_sweep(&d, None, 1.0);
+        assert!(
+            end.contains('◉'),
+            "the whole map is drawn at the end: {end}"
+        );
+        assert_eq!(
+            end,
+            render(&d, None),
+            "the finished sweep is the static map"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

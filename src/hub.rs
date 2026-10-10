@@ -145,8 +145,19 @@ pub enum Outcome {
     Say(String),
 }
 
+/// how long the map takes to sweep from the oldest page to today.
+pub const SWEEP: std::time::Duration = std::time::Duration::from_millis(900);
+
+/// the sweep's progress at `now`, from 0 to 1, once `started` was the start.
+pub fn sweep_at(started: std::time::Instant, now: std::time::Instant) -> f32 {
+    let t = now.saturating_duration_since(started).as_secs_f32() / SWEEP.as_secs_f32();
+    t.clamp(0.0, 1.0)
+}
+
 pub struct Hub {
     pub root: PathBuf,
+    /// when the map was last opened, so it sweeps once per visit
+    sweep_started: Option<std::time::Instant>,
     pub section: usize,
     /// cursor per section, so moving around does not lose your place
     cursors: Vec<usize>,
@@ -169,6 +180,7 @@ impl Hub {
     pub fn open(root: &Path) -> Hub {
         let mut hub = Hub {
             root: root.to_path_buf(),
+            sweep_started: None,
             section: 0,
             cursors: vec![0; Section::ALL.len()],
             query: String::new(),
@@ -226,13 +238,28 @@ impl Hub {
     pub fn next_section(&mut self) {
         self.section = (self.section + 1) % Section::ALL.len();
         self.query.clear();
+        self.enter_section();
         self.refresh();
     }
 
     pub fn prev_section(&mut self) {
         self.section = (self.section + Section::ALL.len() - 1) % Section::ALL.len();
         self.query.clear();
+        self.enter_section();
         self.refresh();
+    }
+
+    /// opening the map starts its sweep, and leaving it forgets the sweep.
+    fn enter_section(&mut self) {
+        self.sweep_started = (self.current() == Section::World).then(std::time::Instant::now);
+    }
+
+    /// the sweep's progress, while the map is still being drawn. None once the
+    /// map is at rest, or when another box is open: nothing to animate then.
+    pub fn sweep_progress(&self) -> Option<f32> {
+        let started = self.sweep_started?;
+        let p = sweep_at(started, std::time::Instant::now());
+        (p < 1.0).then_some(p)
     }
 
     pub fn down(&mut self) {
@@ -306,7 +333,12 @@ impl Hub {
         world::nodes(&self.root)
             .into_iter()
             .map(|n| Item {
-                label: format!("{} {}: {}", world::glyph(n.confidence), n.class.id(), n.name),
+                label: format!(
+                    "{} {}: {}",
+                    world::glyph(n.confidence),
+                    n.class.id(),
+                    n.name
+                ),
                 note: n.day.map(world::iso).unwrap_or_else(|| "undated".into()),
                 action: Action::ReadMemory(n.class, n.name),
             })
@@ -1030,10 +1062,16 @@ mod tests {
     fn a_page_shows_its_links_its_backlinks_and_its_history() {
         let d = seeded();
         let m = Memory::open(&d);
-        m.write(Class::Project, "stack", "rust only, see [[deploy]]").unwrap();
-        m.write(Class::Project, "deploy", "ships from [[stack]]").unwrap();
-        m.write(Class::Project, "stack", "rust only, no async, see [[deploy]]")
+        m.write(Class::Project, "stack", "rust only, see [[deploy]]")
             .unwrap();
+        m.write(Class::Project, "deploy", "ships from [[stack]]")
+            .unwrap();
+        m.write(
+            Class::Project,
+            "stack",
+            "rust only, no async, see [[deploy]]",
+        )
+        .unwrap();
         let mut hub = Hub::open(&d);
         while hub.selected().map(|i| i.label.as_str()) != Some("project: stack") {
             hub.down();
@@ -1165,6 +1203,33 @@ mod tests {
             );
         }
         assert!(hub.detail().contains("today"), "{}", hub.detail());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn opening_the_world_box_sweeps_the_map_once() {
+        let d = seeded();
+        let mut hub = Hub::open(&d);
+        assert_eq!(
+            hub.sweep_progress(),
+            None,
+            "no sweep before the map is opened"
+        );
+        while hub.current() != Section::World {
+            hub.next_section();
+        }
+        let start = std::time::Instant::now();
+        assert_eq!(sweep_at(start, start), 0.0);
+        assert_eq!(sweep_at(start, start + SWEEP), 1.0);
+        assert_eq!(
+            sweep_at(start, start + SWEEP * 2),
+            1.0,
+            "it ends and stays ended"
+        );
+        assert!(
+            hub.sweep_progress().is_some(),
+            "opening the map starts the sweep"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

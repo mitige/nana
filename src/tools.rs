@@ -164,7 +164,7 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-fn resolve(ctx: &Ctx, raw: &str) -> Result<PathBuf, String> {
+pub(crate) fn resolve(ctx: &Ctx, raw: &str) -> Result<PathBuf, String> {
     let p = PathBuf::from(raw);
     let joined = if p.is_absolute() { p } else { ctx.root.join(p) };
     let path = normalize(&joined);
@@ -401,7 +401,9 @@ pub fn run(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> {
             // the page's own check is a shell command, so it passes the same
             // gate as any shell call: a destructive check needs approval too.
             let Some(check) = entry.check else {
-                return Ok(format!("no check on « {name} »: its claim is not verified by a command"));
+                return Ok(format!(
+                    "no check on « {name} »: its claim is not verified by a command"
+                ));
             };
             let out = run("run_shell", &json!({"command": check}), ctx)?;
             if out.starts_with("exit 0") {
@@ -423,7 +425,10 @@ pub fn run(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> {
                     .ok_or_else(|| "confidence is low, medium or high".to_string())?,
                 None => crate::memory::Confidence::Medium,
             };
-            let check = args.get("check").and_then(Value::as_str).filter(|c| !c.trim().is_empty());
+            let check = args
+                .get("check")
+                .and_then(Value::as_str)
+                .filter(|c| !c.trim().is_empty());
             let path = ctx.memory.write_checked(
                 class,
                 arg(args, "name")?,
@@ -635,7 +640,12 @@ mod tests {
             &ctx,
         )
         .unwrap();
-        let holds = run("memory_check", &json!({"class": "project", "name": "manifest"}), &ctx).unwrap();
+        let holds = run(
+            "memory_check",
+            &json!({"class": "project", "name": "manifest"}),
+            &ctx,
+        )
+        .unwrap();
         assert!(holds.starts_with("holds"), "{holds}");
 
         run(
@@ -645,7 +655,12 @@ mod tests {
             &ctx,
         )
         .unwrap();
-        let broken = run("memory_check", &json!({"class": "project", "name": "gone"}), &ctx).unwrap();
+        let broken = run(
+            "memory_check",
+            &json!({"class": "project", "name": "gone"}),
+            &ctx,
+        )
+        .unwrap();
         assert!(broken.starts_with("does not hold"), "{broken}");
 
         run(
@@ -654,7 +669,12 @@ mod tests {
             &ctx,
         )
         .unwrap();
-        let none = run("memory_check", &json!({"class": "project", "name": "bare"}), &ctx).unwrap();
+        let none = run(
+            "memory_check",
+            &json!({"class": "project", "name": "bare"}),
+            &ctx,
+        )
+        .unwrap();
         assert!(none.contains("no check"), "{none}");
         let _ = std::fs::remove_dir_all(&d);
     }

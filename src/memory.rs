@@ -277,10 +277,7 @@ impl Memory {
         } else {
             format!("# {title}\n\n{body}")
         };
-        let text = format!(
-            "{page}\n\n{}\n",
-            footer(&today_iso(), confidence, check)
-        );
+        let text = format!("{page}\n\n{}\n", footer(&today_iso(), confidence, check));
         std::fs::write(&path, &text).map_err(|e| e.to_string())?;
         self.append_history(class, title, &today_iso(), &text);
         Ok(path)
@@ -288,9 +285,11 @@ impl Memory {
 
     /// the file that keeps every version of one page, in the project memory.
     fn history_path(&self, class: Class, name: &str) -> PathBuf {
-        self.root
-            .join(".history")
-            .join(format!("{}--{}.log", class.id(), name.trim().trim_end_matches(".md")))
+        self.root.join(".history").join(format!(
+            "{}--{}.log",
+            class.id(),
+            name.trim().trim_end_matches(".md")
+        ))
     }
 
     /// each write adds an entry, so the page can be read back as it was.
@@ -301,7 +300,11 @@ impl Memory {
         }
         let entry = format!("<!-- nana entry: {day} -->\n{text}\n");
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let _ = f.write_all(entry.as_bytes());
         }
     }
@@ -573,7 +576,10 @@ mod tests {
         let m = Memory::open(&d);
         m.write(Class::Project, "stack", "rust only").unwrap();
         let text = m.read(Class::Project, "stack").unwrap();
-        assert!(text.starts_with("# stack"), "the heading still comes first: {text}");
+        assert!(
+            text.starts_with("# stack"),
+            "the heading still comes first: {text}"
+        );
         assert!(
             text.contains("<!-- nana: updated ") && text.contains("confidence medium"),
             "{text}"
@@ -643,10 +649,17 @@ mod tests {
     fn a_page_links_to_others_with_double_brackets() {
         let d = tmp("links");
         let m = Memory::open(&d);
-        m.write(Class::Project, "stack", "see [[deploy]] and [[ tone ]], not [[]]")
-            .unwrap();
+        m.write(
+            Class::Project,
+            "stack",
+            "see [[deploy]] and [[ tone ]], not [[]]",
+        )
+        .unwrap();
         m.write(Class::Project, "deploy", "uses [[stack]]").unwrap();
-        assert_eq!(m.links(Class::Project, "stack").unwrap(), vec!["deploy", "tone"]);
+        assert_eq!(
+            m.links(Class::Project, "stack").unwrap(),
+            vec!["deploy", "tone"]
+        );
         assert_eq!(m.backlinks("deploy"), vec!["stack"]);
         assert!(m.backlinks("nobody").is_empty());
         let _ = std::fs::remove_dir_all(&d);
