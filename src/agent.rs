@@ -178,19 +178,31 @@ impl Agent {
         let known = if mem.is_empty() {
             "the memory of this project is empty so far.\n".to_string()
         } else {
-            mem
+            let recalled = self.ctx.memory.recall(request, RECALL_BUDGET);
+            if recalled.is_empty() {
+                mem
+            } else {
+                format!("{mem}the pages this request touches, read for you:\n{recalled}")
+            }
         };
         out.push(Section {
             order: 400,
             name: "memory",
             text: format!(
-                "{known}read a page with the memory_read tool when it matters. \
-                 treat memory as a world model of this project: what is true of its state, \
-                 its conventions, and how it behaves. before you act on a page, say what you \
-                 expect from it; after acting, check the result with a tool against that expectation. \
-                 when reality differs, correct the page with memory_write rather than trusting it. \
-                 write a page as soon as you learn something durable: a convention, a decision, \
-                 a fact about the user, a pitfall you hit. record what you learned at the end."
+                "{known}memory is a world model of this project: what is true of its state, \
+                 its conventions, and how it behaves. a wrong page is a bug to fix, not a fact to trust.\n\
+                 memory rules, each one is a duty, not a suggestion:\n\
+                 - when a task starts: call memory_list, then memory_read on every page that touches the \
+                 task. before you act on a page, say what you expect from it.\n\
+                 - when you check a fact: after acting, verify the result with a tool against that \
+                 expectation, and run memory_check on any page that carries a check.\n\
+                 - when a page is wrong: correct the page with memory_write at once, and say which belief was wrong.\n\
+                 - when the user states a preference or a rule: write it as a feedback or user page with memory_write.\n\
+                 - when a decision is made: write a project page with the reason, so the next run does not reopen it.\n\
+                 - when a task ends: write what was learned, the conventions met and the pitfalls hit, \
+                 with memory_write, before your final words.\n\
+                 - before your final words: ask yourself whether anything durable happened in this run; \
+                 if yes, the memory write comes first, the answer comes after."
             ),
         });
         let wiki = crate::knowledge::index(&self.root);
@@ -252,9 +264,15 @@ impl Agent {
         // no step cap: a long session runs until the model answers in words
         // (or the provider fails); stopping on a count left people re-prompting.
         let mut step = 0;
+        // durable work ends in a memory page: a run that changed files and
+        // answers without one is sent back once, never more, so it cannot loop
+        let mut changed_files = false;
+        let mut remembered = false;
+        let mut sent_back = false;
         loop {
             step += 1;
             self.steps = step;
+            shrink_old_tool_results(&mut self.messages, KEEP_WHOLE_RESULTS);
             let reply: Reply = match self.client.chat(&system, &self.messages, &specs) {
                 Ok(r) => r,
                 Err(e) => {
@@ -264,6 +282,22 @@ impl Agent {
             };
             if !reply.text.trim().is_empty() {
                 on(Event::Text(reply.text.clone()));
+            }
+            if reply.tool_calls.is_empty() && changed_files && !remembered && !sent_back {
+                sent_back = true;
+                self.messages.push(Msg {
+                    role: Role::Assistant,
+                    content: reply.text.clone(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                });
+                let nudge = "you changed files without a memory page. before you answer, \
+                              write what this change taught you with memory_write: \
+                              a convention, a decision, or a pitfall you hit.";
+                self.messages.push(Msg::user(nudge));
+                self.log("assistant", &reply.text, None, None);
+                self.log("user", nudge, None, None);
+                continue;
             }
             if reply.tool_calls.is_empty() {
                 self.messages.push(Msg {
@@ -301,6 +335,13 @@ impl Agent {
                     Ok(t) => (true, t),
                     Err(e) => (false, format!("error: {e}")),
                 };
+                if ok {
+                    match call.name.as_str() {
+                        "write_file" | "edit_file" => changed_files = true,
+                        "memory_write" => remembered = true,
+                        _ => {}
+                    }
+                }
                 on(Event::ToolResult {
                     name: call.name.clone(),
                     ok,
@@ -347,6 +388,38 @@ impl Agent {
 
 /// the file a tool is about to touch, with the text it will write. only the
 /// writes are shown before they land: a read shows what the tool returns.
+/// how much memory the prompt may carry for one request, in characters.
+const RECALL_BUDGET: usize = 6000;
+
+/// the newest tool results stay whole; older ones keep a head so the model
+/// still sees what they were, and it can run the tool again to see the rest.
+const KEEP_WHOLE_RESULTS: usize = 4;
+const OLD_RESULT_HEAD: usize = 300;
+
+/// a long session re-sends every message on each turn. an old tool result
+/// (a file read, a grep) is the bulk of that, and it is stale by then: cut it
+/// to its head, keep the call id so the pairing with the call stays valid.
+fn shrink_old_tool_results(msgs: &mut [Msg], keep_whole: usize) {
+    let tools: Vec<usize> = msgs
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == Role::Tool)
+        .map(|(i, _)| i)
+        .collect();
+    let old = tools.len().saturating_sub(keep_whole);
+    for &i in &tools[..old] {
+        let m = &mut msgs[i];
+        if m.content.chars().count() <= OLD_RESULT_HEAD {
+            continue;
+        }
+        let head: String = m.content.chars().take(OLD_RESULT_HEAD).collect();
+        m.content = format!(
+            "{head}\n[… {} characters elided from an older result; run the tool again to see them]",
+            m.content.chars().count() - OLD_RESULT_HEAD
+        );
+    }
+}
+
 fn file_event(name: &str, args: &Value, ctx: &crate::tools::Ctx) -> Option<(String, String, bool)> {
     match name {
         "write_file" => Some((
@@ -470,10 +543,23 @@ mod tests {
     fn scripted(bodies: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
         let handle = std::thread::spawn(move || {
             let mut seen = Vec::new();
             for body in bodies {
-                let (mut sock, _) = listener.accept().unwrap();
+                // a run that makes fewer model calls than scripted must fail
+                // the test, not leave the server waiting forever
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let mut sock = loop {
+                    match listener.accept() {
+                        Ok((sock, _)) => break sock,
+                        Err(_) if std::time::Instant::now() < deadline => {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(_) => return seen,
+                    }
+                };
+                sock.set_nonblocking(false).unwrap();
                 seen.push(read_request(&mut sock));
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -511,6 +597,55 @@ mod tests {
     }
 
     #[test]
+    fn the_prompt_carries_the_memory_the_request_touches_not_only_its_names() {
+        let d = tmp("recall-prompt");
+        let m = crate::memory::Memory::open(&d);
+        m.write(
+            crate::memory::Class::Project,
+            "parser",
+            "# parser\n\npratt loop, no recursion past depth 8",
+        )
+        .unwrap();
+        let a = Agent::with_client(
+            &d,
+            Settings::default(),
+            Client::local("http://127.0.0.1:1", "m"),
+        );
+        let p = a.system_prompt("refactor the parser");
+        assert!(
+            p.contains("pratt loop"),
+            "the page body is in the prompt: {p}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn old_tool_results_are_shrunk_so_the_context_stops_growing() {
+        let big = "x".repeat(20_000);
+        let mut msgs = vec![Msg::user("q")];
+        for i in 0..6 {
+            msgs.push(Msg::tool(&format!("c{i}"), big.clone()));
+        }
+        shrink_old_tool_results(&mut msgs, 2);
+        assert_eq!(msgs[0].content, "q", "the question is never shrunk");
+        for (i, m) in msgs[1..].iter().enumerate() {
+            assert_eq!(
+                m.tool_call_id.as_deref(),
+                Some(format!("c{i}").as_str()),
+                "the call id is kept so the pairing stays valid"
+            );
+        }
+        assert!(msgs[1].content.len() < 1000, "an old result is shrunk");
+        assert!(
+            msgs[1].content.contains("elided"),
+            "the model is told it was cut and can read it again: {}",
+            &msgs[1].content
+        );
+        assert_eq!(msgs[5].content.len(), 20_000, "the last two stay whole");
+        assert_eq!(msgs[6].content.len(), 20_000, "the last two stay whole");
+    }
+
+    #[test]
     fn an_empty_memory_still_asks_the_agent_to_remember() {
         let d = tmp("memory-empty");
         let a = Agent::with_client(
@@ -542,6 +677,84 @@ mod tests {
             p.contains("correct the page"),
             "a wrong belief is never corrected: {p}"
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn memory_rules_name_each_moment_that_calls_for_a_memory_act() {
+        let d = tmp("memory-rules");
+        let a = Agent::with_client(
+            &d,
+            Settings::default(),
+            Client::local("http://127.0.0.1:1", "m"),
+        );
+        let p = a.system_prompt("refactor the parser");
+        assert!(p.contains("memory rules"), "the rules have no heading: {p}");
+        assert!(
+            p.contains("when a task starts"),
+            "no start-of-task trigger: {p}"
+        );
+        assert!(
+            p.contains("when a task ends"),
+            "no end-of-task trigger: {p}"
+        );
+        assert!(
+            p.contains("when a page is wrong"),
+            "no correction trigger: {p}"
+        );
+        assert!(
+            p.contains("when the user states a preference"),
+            "no user-preference trigger: {p}"
+        );
+        assert!(
+            p.contains("before your final words"),
+            "the agent may end without recording: {p}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// a run that changed files and then answers without a memory page is
+    /// sent back once: the loop does not let durable work end unrecorded.
+    #[test]
+    fn durable_work_without_a_memory_page_is_sent_back_before_the_answer() {
+        let d = tmp("gate");
+        let write = serde_json::json!({"path": "src/a.rs", "content": "fn a() {}"}).to_string();
+        let mem =
+            serde_json::json!({"class": "project", "name": "a", "content": "a is new"}).to_string();
+        let call = |id: &str, name: &str, args: &str| {
+            serde_json::json!({"choices":[{"message":{"content":"","tool_calls":[
+                {"id":id,"type":"function","function":{"name":name,"arguments":args}}]}}]})
+            .to_string()
+        };
+        let (url, server) = scripted(vec![
+            call("c1", "write_file", &write),
+            r#"{"choices":[{"message":{"content":"written"}}]}"#.to_string(),
+            call("c2", "memory_write", &mem),
+            r#"{"choices":[{"message":{"content":"all recorded"}}]}"#.to_string(),
+        ]);
+        let mut a = agent_at(&d, &url);
+        let answer = a.run("add a", |_| {}).unwrap();
+        let seen = server.join().unwrap();
+        assert_eq!(answer, "all recorded", "the run went on after the gate");
+        assert_eq!(seen.len(), 4, "the gate added one more model call");
+        assert!(
+            seen[2].contains("changed files without a memory page"),
+            "the model was sent back to memory: {}",
+            &seen[2][..seen[2].len().min(300)]
+        );
+        assert!(d.join(".nana/memory/project/a.md").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_read_only_run_is_not_sent_back_to_memory() {
+        let d = tmp("gate-read");
+        let (url, server) = scripted(vec![
+            r#"{"choices":[{"message":{"content":"the answer"}}]}"#.to_string(),
+        ]);
+        let mut a = agent_at(&d, &url);
+        assert_eq!(a.run("what is here?", |_| {}).unwrap(), "the answer");
+        assert_eq!(server.join().unwrap().len(), 1, "no extra call for a read");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -632,6 +845,8 @@ mod tests {
         let (url, server) = scripted(vec![
             reply,
             r#"{"choices":[{"message":{"content":"done"}}]}"#.to_string(),
+            // the gate sends the run back once for a memory page
+            r#"{"choices":[{"message":{"content":"noted"}}]}"#.to_string(),
         ]);
         let mut a = agent_at(&d, &url);
         let mut events = Vec::new();

@@ -136,6 +136,14 @@ pub fn specs() -> Vec<ToolSpec> {
             ),
         },
         ToolSpec {
+            name: "memory_audit".into(),
+            description: "look over the memory of this project for pages that repeat each other \
+                          and pages past their staleness limit. it only reports: nothing is \
+                          deleted or merged, that needs the user's approval."
+                .into(),
+            parameters: obj(json!({}), json!([])),
+        },
+        ToolSpec {
             name: "memory_check".into(),
             description: "run the check attached to a memory page. use it before you rely on a \
                           page that says it is checkable; a page that does not hold is wrong and must be corrected."
@@ -412,6 +420,20 @@ pub fn run(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> {
                 Ok(format!("does not hold: {name}\n{out}"))
             }
         }
+        "memory_audit" => {
+            let audit = ctx.memory.audit();
+            if audit.duplicates.is_empty() && audit.stale.is_empty() {
+                return Ok("memory audit: no duplicate and no stale page".into());
+            }
+            let mut lines = vec!["memory audit, nothing was changed:".to_string()];
+            for (a, b) in &audit.duplicates {
+                lines.push(format!("duplicate: {a} and {b} say the same thing"));
+            }
+            for s in &audit.stale {
+                lines.push(format!("stale: {s} is past its limit, check it"));
+            }
+            Ok(lines.join("\n"))
+        }
         "memory_read" => {
             let class = Class::parse(arg(args, "class")?)
                 .ok_or_else(|| "classes are user, feedback, project, reference".to_string())?;
@@ -680,6 +702,39 @@ mod tests {
     }
 
     #[test]
+    fn memory_audit_reports_duplicates_and_stale_pages_without_touching_them() {
+        let d = tmp("audit-tool");
+        let ctx = Ctx::new(&d, true);
+        run(
+            "memory_write",
+            &json!({"class": "project", "name": "a", "content": "same words"}),
+            &ctx,
+        )
+        .unwrap();
+        run(
+            "memory_write",
+            &json!({"class": "project", "name": "b", "content": "same words"}),
+            &ctx,
+        )
+        .unwrap();
+        let report = run("memory_audit", &json!({}), &ctx).unwrap();
+        assert!(
+            report.contains("project/a") && report.contains("project/b"),
+            "{report}"
+        );
+        assert!(report.contains("same"), "{report}");
+        assert!(
+            d.join(".nana/memory/project/a.md").exists(),
+            "audit deleted a page"
+        );
+        assert!(
+            d.join(".nana/memory/project/b.md").exists(),
+            "audit deleted a page"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn every_declared_tool_is_executable() {
         // a spec with no implementation would be a lie told to the model
         let d = tmp("specs");
@@ -694,6 +749,7 @@ mod tests {
                 "grep" => json!({"pattern": "x"}),
                 "run_shell" => json!({"command": "true"}),
                 "memory_list" => json!({}),
+                "memory_audit" => json!({}),
                 "memory_check" => json!({"class": "user", "name": "absent"}),
                 "memory_read" => json!({"class": "user", "name": "absent"}),
                 "memory_write" => json!({"class": "user", "name": "n", "content": "c"}),

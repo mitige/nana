@@ -424,6 +424,83 @@ impl Memory {
         out
     }
 
+    /// the bodies the request needs, inside a character budget: every user
+    /// preference, then the pages whose name or title the request mentions.
+    /// a page that is stale or unsure says so, so the agent checks it first.
+    pub fn recall(&self, request: &str, budget: usize) -> String {
+        let req = request.to_lowercase();
+        let entries = self.list();
+        let mut picked: Vec<&Entry> = entries.iter().filter(|e| e.class == Class::User).collect();
+        for e in entries.iter().filter(|e| e.class != Class::User) {
+            let name = e.name.to_lowercase();
+            let title = e.title.to_lowercase();
+            let mentioned = req.contains(&name)
+                || (!title.is_empty() && req.contains(&title))
+                || req
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|w| w.len() > 3 && name.split('-').any(|p| p == w));
+            if mentioned {
+                picked.push(e);
+            }
+        }
+        let mut out = String::new();
+        for e in picked {
+            let Ok(text) = std::fs::read_to_string(&e.path) else {
+                continue;
+            };
+            let body: String = text
+                .lines()
+                .filter(|l| !is_footer(l))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut flags = Vec::new();
+            if e.stale() {
+                flags.push("stale: check it before you rely on it".to_string());
+            }
+            if e.confidence == Some(Confidence::Low) {
+                flags.push("low confidence: check it before you rely on it".to_string());
+            }
+            let flag = if flags.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", flags.join("; "))
+            };
+            let block = format!("--- {}/{}{flag}\n{}\n", e.class.id(), e.name, body.trim());
+            if out.chars().count() + block.chars().count() > budget {
+                let room = budget.saturating_sub(out.chars().count());
+                out.extend(block.chars().take(room));
+                break;
+            }
+            out.push_str(&block);
+        }
+        out
+    }
+
+    /// reads every page and reports what needs a human decision. read only.
+    pub fn audit(&self) -> Audit {
+        let entries = self.list();
+        let mut bodies: Vec<(String, Vec<String>)> = Vec::new();
+        let mut stale = Vec::new();
+        for e in &entries {
+            let key = format!("{}/{}", e.class.id(), e.name);
+            if e.stale() {
+                stale.push(key.clone());
+            }
+            if let Ok(text) = std::fs::read_to_string(&e.path) {
+                bodies.push((key, words_of(&text)));
+            }
+        }
+        let mut duplicates = Vec::new();
+        for (i, (a, wa)) in bodies.iter().enumerate() {
+            for (b, wb) in bodies.iter().skip(i + 1) {
+                if !wa.is_empty() && wa == wb {
+                    duplicates.push((a.clone(), b.clone()));
+                }
+            }
+        }
+        Audit { duplicates, stale }
+    }
+
     /// the page the agent gets shown: names and titles, not the whole store.
     pub fn index(&self) -> String {
         let entries = self.list();
@@ -448,6 +525,28 @@ impl Memory {
         }
         out
     }
+}
+
+/// what the audit found: pages that say the same words, and pages past the
+/// staleness limit. it only reports; deleting or merging a page is a change the
+/// user approves, never a side effect of looking.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Audit {
+    /// pairs of `class/name` whose bodies hold the same words in the same order
+    pub duplicates: Vec<(String, String)>,
+    /// `class/name` of every page past the staleness limit
+    pub stale: Vec<String>,
+}
+
+/// the words of a body, lowercased, so a copy that differs only in case or
+/// spacing still matches. the heading is left out: two pages with different
+/// names but the same content are the duplicate we are looking for.
+fn words_of(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|l| !is_footer(l) && !l.trim_start().starts_with('#'))
+        .flat_map(|l| l.split_whitespace())
+        .map(|w| w.to_lowercase())
+        .collect()
 }
 
 /// the names inside `[[ ]]`: trimmed, empty ones dropped, each name once.
@@ -662,6 +761,96 @@ mod tests {
         );
         assert_eq!(m.backlinks("deploy"), vec!["stack"]);
         assert!(m.backlinks("nobody").is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn recall_brings_the_body_of_the_pages_the_request_touches() {
+        let d = tmp("recall");
+        let m = Memory::open(&d);
+        m.write(
+            Class::Project,
+            "parser",
+            "# parser\n\npratt loop, no recursion past depth 8",
+        )
+        .unwrap();
+        m.write(Class::Project, "release", "# release\n\ntag then push")
+            .unwrap();
+        m.write(Class::User, "tone", "blunt, no filler").unwrap();
+        let r = m.recall("refactor the parser", 4000);
+        assert!(
+            r.contains("pratt loop"),
+            "the touched page is recalled: {r}"
+        );
+        assert!(
+            !r.contains("tag then push"),
+            "an unrelated page is not pulled in: {r}"
+        );
+        assert!(
+            r.contains("blunt, no filler"),
+            "user preferences are always recalled: {r}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn recall_marks_a_stale_or_unsure_page_so_it_is_checked_before_use() {
+        let d = tmp("recall-stale");
+        let m = Memory::open(&d);
+        let dir = d.join(".nana/memory/project");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("parser.md"),
+            "# parser\n\nold parser fact\n\n<!-- nana: updated 2001-01-01, confidence low -->\n",
+        )
+        .unwrap();
+        let r = m.recall("the parser", 4000);
+        assert!(r.contains("old parser fact"), "{r}");
+        assert!(
+            r.contains("stale"),
+            "a page from 2001 says it is stale: {r}"
+        );
+        assert!(r.contains("low"), "an unsure page says so: {r}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn recall_stays_within_its_character_budget() {
+        let d = tmp("recall-budget");
+        let m = Memory::open(&d);
+        m.write(Class::Project, "parser", &"parser ".repeat(2000))
+            .unwrap();
+        let r = m.recall("the parser", 500);
+        assert!(r.chars().count() <= 500, "{} chars", r.chars().count());
+        assert!(r.contains("parser"), "the start of the page is kept: {r}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_audit_finds_pages_that_say_the_same_thing_and_stale_ones() {
+        let d = tmp("audit");
+        let m = Memory::open(&d);
+        m.write(Class::Project, "stack", "rust only, no async")
+            .unwrap();
+        m.write(Class::Reference, "stack-copy", "Rust only,  no async\n")
+            .unwrap();
+        m.write(Class::User, "tone", "blunt").unwrap();
+        let dir = d.join(".nana/memory/project");
+        std::fs::write(
+            dir.join("ancient.md"),
+            "# ancient\n\nold fact\n\n<!-- nana: updated 2001-01-01, confidence high -->\n",
+        )
+        .unwrap();
+        let audit = m.audit();
+        assert_eq!(
+            audit.duplicates,
+            vec![(
+                "project/stack".to_string(),
+                "reference/stack-copy".to_string()
+            )],
+            "the two pages with the same words are paired, whatever the case"
+        );
+        assert_eq!(audit.stale, vec!["project/ancient".to_string()]);
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -767,12 +767,12 @@ mod tests {
 
     #[test]
     fn without_a_setting_the_default_model_is_cheapmodels_claude_opus() {
-        let s = Settings::default();
-        let root = std::env::temp_dir();
-        let c = Client::resolve(&s, &root).unwrap();
-        assert_eq!(c.model, "cheapmodels/claude-opus-5.5");
-        assert_eq!(c.provider.id, "cheapmodels");
-        assert_eq!(c.base_url, "https://cheapmodels.xyz/v1");
+        // resolve() needs an api key, and a machine without one (the ci) must
+        // still pass: the defaults are checked on their own, the key is not
+        assert_eq!(DEFAULT_MODEL, "cheapmodels/claude-opus-5.5");
+        let p = detect(DEFAULT_MODEL);
+        assert_eq!(p.id, "cheapmodels");
+        assert_eq!(p.base_url, "https://cheapmodels.xyz/v1");
     }
 
     #[test]

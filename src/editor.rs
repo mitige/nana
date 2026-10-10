@@ -44,6 +44,12 @@ const CHECK_TTL: Duration = Duration::from_secs(10);
 const SLIDE_IN: Duration = Duration::from_millis(160);
 /// how long a toast lives, and how long it spends fading out.
 const TOAST_TTL: Duration = Duration::from_millis(3500);
+/// one playback tick is one frame of the animation loop, at about 60 fps.
+const TICK: Duration = Duration::from_millis(16);
+/// how long a new view takes to sweep in from the left.
+const VIEW_SWEEP: Duration = Duration::from_millis(240);
+/// how long the agent's cursor takes to glide from the line it left to the next.
+const CURSOR_GLIDE: Duration = Duration::from_millis(160);
 /// the spinner: ten braille frames, one every 80 ms.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// the rounded ends of a pill segment (powerline half circles).
@@ -336,9 +342,73 @@ struct AgentPane {
     trail: Vec<crate::trail::Step>,
     /// when the card opened: the trail's clock starts here
     started: std::time::Instant,
+    /// when the agent last produced anything: the time it took to reach the
+    /// next write is the time that write lasts on screen
+    last_event: std::time::Instant,
+    /// the tool call waiting for its answer, and whether its file was already
+    /// announced (a write or a read plays as the file, not as a tool action)
+    pending: Option<(String, serde_json::Value, bool)>,
+    /// the transcript already wrapped to the card's width, so a frame only
+    /// wraps the lines that arrived since the last one
+    transcript: TranscriptRows,
+}
+
+/// the transcript as rows ready to paint. lines are only ever appended, so the
+/// rows of the lines already wrapped stay valid; a new width starts over.
+#[derive(Default)]
+struct TranscriptRows {
+    width: usize,
+    /// how many transcript lines are wrapped into `rows`
+    wrapped: usize,
+    rows: Vec<Line<'static>>,
+}
+
+impl TranscriptRows {
+    /// wrap the lines that are new since the last call, at `width`.
+    fn sync(&mut self, lines: &[(String, String)], width: usize) {
+        if width != self.width || lines.len() < self.wrapped {
+            self.width = width;
+            self.wrapped = 0;
+            self.rows.clear();
+        }
+        for (kind, text) in &lines[self.wrapped..] {
+            let (label, color) = transcript_label(kind);
+            let mut first = true;
+            for chunk in wrap(text, width.saturating_sub(6)) {
+                self.rows.push(Line::from(vec![
+                    Span::styled(
+                        if first { label } else { "     " },
+                        Style::default().fg(color),
+                    ),
+                    Span::styled(chunk, Style::default().fg(Ed::text())),
+                ]));
+                first = false;
+            }
+        }
+        self.wrapped = lines.len();
+    }
+}
+
+/// the label and colour a transcript line is painted with, by its kind.
+fn transcript_label(kind: &str) -> (&'static str, ratatui::style::Color) {
+    match kind {
+        "you" => ("you  ", Ed::accent()),
+        "agent" => ("nana ", Ed::cyan()),
+        "tool" => ("->   ", Ed::amber()),
+        "ok" => ("ok   ", Ed::green()),
+        "refused" => ("no   ", Ed::red()),
+        "error" => ("err  ", Ed::red()),
+        _ => ("     ", Ed::gutter()),
+    }
 }
 
 impl AgentPane {
+    /// the transcript's rows at `width`, wrapping only what is new.
+    fn rendered_rows(&mut self, width: usize) -> &[Line<'static>] {
+        self.transcript.sync(&self.lines, width);
+        &self.transcript.rows
+    }
+
     fn new() -> AgentPane {
         AgentPane {
             input: String::new(),
@@ -354,6 +424,9 @@ impl AgentPane {
             writes: Vec::new(),
             trail: Vec::new(),
             started: std::time::Instant::now(),
+            last_event: std::time::Instant::now(),
+            pending: None,
+            transcript: TranscriptRows::default(),
         }
     }
 
@@ -362,7 +435,7 @@ impl AgentPane {
         let at = self.started.elapsed().as_secs_f32();
         self.trail.push(crate::trail::Step {
             lane,
-            label,
+            label: safe_text(&label).replace('\n', " "),
             at,
             ok,
         });
@@ -404,6 +477,10 @@ impl AgentPane {
         };
         let mut done = false;
         while let Ok(event) = rx.try_recv() {
+            let waited = self.last_event.elapsed();
+            if !matches!(event, crate::agent::Event::ToolCall { .. }) {
+                self.last_event = Instant::now();
+            }
             match event {
                 crate::agent::Event::Started {
                     model, provider, ..
@@ -411,6 +488,7 @@ impl AgentPane {
                     self.status = format!("{model} via {provider}");
                 }
                 crate::agent::Event::Text(t) => {
+                    let t = safe_text(&t);
                     self.record(crate::trail::Lane::Say, t.clone(), true);
                     self.lines.push(("agent".into(), t));
                 }
@@ -418,6 +496,7 @@ impl AgentPane {
                     let label = format!("{name} {}", short_json(&args));
                     self.record(crate::trail::Lane::Tool, label.clone(), true);
                     self.lines.push(("tool".into(), label));
+                    self.pending = Some((name, args, false));
                 }
                 crate::agent::Event::ToolResult { name, ok, text } => {
                     self.record(
@@ -425,9 +504,26 @@ impl AgentPane {
                         format!("{name}: {}", text.trim()),
                         ok,
                     );
+                    // every action is played, not only the files: a tool that
+                    // did not announce a file shows its call and its answer
+                    if let Some((call, args, shown)) = self.pending.take() {
+                        if call == name && !shown {
+                            let mut text_lines = vec![format!("> {name} {}", short_json(&args))];
+                            text_lines.extend(text.trim().lines().map(safe_text));
+                            self.writes.push(LiveWrite {
+                                path: PathBuf::from(ACTIONS_VIEW),
+                                text: text_lines,
+                                shown: 0,
+                                col: 0,
+                                ticks: ticks_for(waited),
+                                elapsed: 0,
+                                write: false,
+                            });
+                        }
+                    }
                     self.lines.push((
                         if ok { "ok".into() } else { "refused".into() },
-                        format!("{name}: {}", text.trim()),
+                        format!("{name}: {}", safe_text(text.trim())),
                     ));
                 }
                 crate::agent::Event::File {
@@ -436,13 +532,19 @@ impl AgentPane {
                     write,
                 } => {
                     self.record(crate::trail::Lane::File, path.clone(), true);
+                    if let Some(call) = &mut self.pending {
+                        call.2 = true;
+                    }
                     self.writes.push(LiveWrite {
                         path: PathBuf::from(&path),
-                        text: content.lines().map(str::to_string).collect(),
+                        text: content.lines().map(safe_text).collect(),
                         shown: 0,
+                        col: 0,
+                        ticks: ticks_for(waited),
+                        elapsed: 0,
                         write,
                     });
-                    self.lines.push(("file".into(), path));
+                    self.lines.push(("file".into(), safe_text(&path)));
                 }
                 crate::agent::Event::Finished { steps } => {
                     self.status = format!("done in {steps} step(s)");
@@ -450,7 +552,7 @@ impl AgentPane {
                 }
                 crate::agent::Event::Error(e) => {
                     self.record(crate::trail::Lane::Result, e.clone(), false);
-                    self.lines.push(("error".into(), e));
+                    self.lines.push(("error".into(), safe_text(&e)));
                     self.status = "failed".into();
                     done = true;
                 }
@@ -474,6 +576,72 @@ fn short_json(v: &serde_json::Value) -> String {
     }
 }
 
+/// what a cell is allowed to show. text from the agent or from a file can carry
+/// bytes a terminal acts on (escape sequences, carriage returns, bells) or marks
+/// that take no room but still move things about. they are removed where the
+/// text comes in; tabs become spaces to the next stop, and a line break is kept.
+fn safe_text(s: &str) -> String {
+    let mut clean = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => skip_escape(&mut chars),
+            '\t' | '\n' => clean.push(c),
+            c if c.is_control() || is_invisible(c) => {}
+            c => clean.push(c),
+        }
+    }
+    clean
+        .split('\n')
+        .map(expand_tabs)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// marks that take no room on screen and still change what a terminal shows.
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{fe00}'..='\u{fe0f}'
+            | '\u{feff}'
+    )
+}
+
+/// the end of an escape sequence, already past its ESC: a CSI runs to its final
+/// byte, a string (OSC, DCS...) to its bell or its terminator, and any other
+/// pair is two bytes.
+fn skip_escape(chars: &mut std::str::Chars) {
+    match chars.next() {
+        Some('[') => {
+            for c in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    break;
+                }
+            }
+        }
+        Some(']' | 'P' | 'X' | '^' | '_') => {
+            while let Some(c) = chars.next() {
+                if c == '\u{7}' {
+                    break;
+                }
+                if c == '\u{1b}' {
+                    chars.next();
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// the name of the view that holds the agent's tool actions (memory, search,
+/// shell, edits): they are not files, so they share one view instead of each
+/// replacing the last.
+const ACTIONS_VIEW: &str = "agent actions";
+
 /// the agent's view: the file it is writing or reading, line by line, with its
 /// own cursor. it is a separate buffer from the user's, so neither overrides
 /// the other.
@@ -484,6 +652,10 @@ struct AgentView {
     cy: usize,
     cx: usize,
     write: bool,
+    /// when this view was swept in: it slides in from the left over VIEW_SWEEP
+    opened: Option<Instant>,
+    /// the line the cursor left, and when it left it: the cursor glides from there
+    glide: Option<(usize, Instant)>,
 }
 
 /// a write in progress, played back: the text the agent is putting in a file,
@@ -493,8 +665,21 @@ struct LiveWrite {
     path: PathBuf,
     text: Vec<String>,
     shown: usize,
+    /// characters of line `shown` already on screen
+    col: usize,
+    /// ticks the whole text must take; 0 means one letter per tick
+    ticks: usize,
+    /// ticks played so far
+    elapsed: usize,
     /// false for a read: the buffer shows the file, it is not changed by it
     write: bool,
+}
+
+/// the frames a write lasts: the time the agent took to produce it, in ticks.
+/// a write that followed a long pause plays slowly; one that followed a quick
+/// step plays fast. nothing here is a fixed pace.
+fn ticks_for(waited: Duration) -> usize {
+    (waited.as_millis() / TICK.as_millis()).max(1) as usize
 }
 
 /// Niveau d'une notification toast.
@@ -565,7 +750,7 @@ pub struct Editor {
     /// the one on screen
     live: Vec<LiveWrite>,
     /// the agent's own view of the file it writes or reads: a buffer and a
-    /// cursor of its own, drawn in the agent column, never in the user's buffer
+    /// cursor of its own, drawn behind the card, never in the user's buffer
     agent_view: AgentView,
     /// the hub (^w): the boxes — memory, providers, skills, personas, agents
     hub: Option<crate::hub::Hub>,
@@ -862,8 +1047,15 @@ impl Editor {
         if text.is_empty() {
             return;
         }
+        // the agent card owns the keyboard: its paste goes into the prompt,
+        // line breaks kept, and never into the user's buffer behind the card
+        if let Some(pane) = self.agent_pane.as_mut() {
+            let cleaned = safe_text(&text.replace("\r\n", "\n").replace('\r', "\n"));
+            pane.input.push_str(&cleaned);
+            return;
+        }
         // a modal card owns the keyboard: a paste goes nowhere while it is open
-        if self.agent_pane.is_some() || self.hub.is_some() {
+        if self.hub.is_some() {
             return;
         }
         self.snapshot();
@@ -1252,25 +1444,87 @@ impl Editor {
     /// one step of a write in progress: the next line of the agent's text
     /// lands in the buffer, the cursor follows it, and when the text is whole
     /// the buffer is the saved file, so nothing reads as an unsaved edit.
+    /// the user has moved on (card closed, another file opened, the hub
+    /// taken): the playback stops where it is, what was shown stays shown.
+    fn interrupt_live(&mut self) {
+        self.live.clear();
+    }
+
     fn play_live(&mut self) {
         let Some(w) = self.live.first_mut() else {
             return;
         };
         // the agent's text goes to the agent's own view. the user's buffer,
         // its file, its cursor and its unsaved work are never touched here.
-        if w.shown == 0 {
-            self.agent_view = AgentView {
-                path: Some(w.path.clone()),
-                lines: Vec::new(),
-                cy: 0,
-                cx: 0,
-                write: w.write,
-            };
+        // the actions of the agent share one view and pile up in it, so every
+        // one stays on screen; a file replaces the view as before
+        let joins_actions = w.path == Path::new(ACTIONS_VIEW)
+            && self.agent_view.path.as_deref() == Some(Path::new(ACTIONS_VIEW));
+        let old_cy = self.agent_view.cy;
+        let mut fresh = false;
+        if w.shown == 0 && w.col == 0 {
+            if joins_actions {
+                if !self.agent_view.lines.is_empty() {
+                    self.agent_view.lines.push(String::new());
+                }
+            } else {
+                fresh = true;
+                self.agent_view = AgentView {
+                    path: Some(w.path.clone()),
+                    lines: Vec::new(),
+                    cy: 0,
+                    cx: 0,
+                    write: w.write,
+                    opened: Some(Instant::now()),
+                    glide: None,
+                };
+            }
         }
-        if w.shown < w.text.len() {
-            self.agent_view.lines.push(w.text[w.shown].clone());
-            w.shown += 1;
-            self.agent_view.cy = self.agent_view.lines.len() - 1;
+        // the text lands against a cumulative target: after tick n of `ticks`,
+        // total * n / ticks letters are on screen, so the write ends on its
+        // last tick whatever its length. ticks 0 is one letter per tick, so
+        // the cursor moves along the line the way a person types.
+        let total: usize = w.text.iter().map(|l| l.chars().count()).sum();
+        let before: usize = w.text[..w.shown.min(w.text.len())]
+            .iter()
+            .map(|l| l.chars().count())
+            .sum::<usize>()
+            + w.col;
+        w.elapsed += 1;
+        let target = if w.ticks == 0 {
+            before + 1
+        } else {
+            (total * w.elapsed / w.ticks).min(total)
+        };
+        let last_tick = w.ticks > 0 && w.elapsed >= w.ticks;
+        let mut revealed = before;
+        while w.shown < w.text.len() && (revealed < target || last_tick) {
+            let line = &w.text[w.shown];
+            let len = line.chars().count();
+            if w.col == 0 {
+                self.agent_view.lines.push(String::new());
+            }
+            if w.col < len {
+                if let (Some(ch), Some(out)) =
+                    (line.chars().nth(w.col), self.agent_view.lines.last_mut())
+                {
+                    out.push(ch);
+                }
+                w.col += 1;
+                revealed += 1;
+            }
+            if w.col >= len {
+                w.shown += 1;
+                w.col = 0;
+            }
+        }
+        // the cursor moved down a line: it glides from the line it left
+        let new_cy = self.agent_view.lines.len().saturating_sub(1);
+        if !fresh && !self.agent_view.lines.is_empty() && new_cy != old_cy {
+            self.agent_view.glide = Some((old_cy, Instant::now()));
+        }
+        if !self.agent_view.lines.is_empty() {
+            self.agent_view.cy = new_cy;
             self.agent_view.cx = self.agent_view.lines[self.agent_view.cy].chars().count();
         }
         if w.shown >= w.text.len() {
@@ -1952,6 +2206,7 @@ impl Editor {
 
     /// load a file into the buffer, wherever it comes from.
     fn open_path(&mut self, path: std::path::PathBuf) {
+        self.interrupt_live();
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 self.snapshot();
@@ -2052,6 +2307,17 @@ impl Editor {
                     pane.status = "cancelled".into();
                 } else {
                     self.agent_pane = None;
+                    self.interrupt_live();
+                }
+            }
+            // alt or shift + enter starts a new line of the prompt; enter sends it
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+            {
+                if !pane.busy {
+                    pane.input.push('\n');
                 }
             }
             KeyCode::Enter => {
@@ -2157,6 +2423,7 @@ impl Editor {
             self.status = "buffer modified — ^s to save first".into();
             return;
         }
+        self.interrupt_live();
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
@@ -2672,22 +2939,6 @@ fn expand_tabs(s: &str) -> String {
     out
 }
 
-/// The column a character index lands on, tabs expanded — used for the cursor.
-fn visual_col(s: &str, index: usize) -> usize {
-    let mut col = 0usize;
-    for (i, ch) in s.chars().enumerate() {
-        if i >= index {
-            break;
-        }
-        if ch == '\t' {
-            col += 4 - (col % 4);
-        } else {
-            col += 1;
-        }
-    }
-    col
-}
-
 fn render_line(text: &str, palette_dim: Color, ext: &str) -> Vec<Span<'static>> {
     // coloration par langage (extension du fichier) via syntect — thème Minuit
     let hl = highlight::highlight_code(text, ext);
@@ -2930,7 +3181,31 @@ fn draw_welcome_float(frame: &mut Frame, area: ratatui::layout::Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// the frame, then a last check on every cell: nothing a terminal would act on
+/// reaches the screen. text is cleaned where it enters (safe_text); this is the
+/// net under it, so a path that forgets to clean cannot glitch the view.
 fn draw(frame: &mut Frame, ed: &mut Editor) {
+    draw_scene(frame, ed);
+    scrub(frame.buffer_mut());
+}
+
+fn scrub(buf: &mut ratatui::buffer::Buffer) {
+    let area = buf.area;
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            let cell = &mut buf[(x, y)];
+            if cell
+                .symbol()
+                .chars()
+                .any(|c| c.is_control() || is_invisible(c))
+            {
+                cell.set_symbol(" ");
+            }
+        }
+    }
+}
+
+fn draw_scene(frame: &mut Frame, ed: &mut Editor) {
     let area = frame.area();
     // fond unifié sur toute la surface — la signature « Minuit »
     fill(frame, area, Style::default().bg(Ed::bg()));
@@ -3027,10 +3302,15 @@ fn draw(frame: &mut Frame, ed: &mut Editor) {
         draw_toasts(frame, ed, area);
         return;
     }
-    // the agent is a column of its own beside the editor, never a card drawn
-    // over it: the user's buffer and the agent's view are both on screen
-    if ed.agent_pane.is_some() {
-        draw_agent_column(frame, ed, area);
+    if let Some(pane) = &mut ed.agent_pane {
+        // the agent's view is the background; the card clears its own rectangle
+        // on top of it, so what is behind never shows through the card.
+        clear_area(frame, area);
+        let (card_zone, _) = agent_layout(area);
+        let playing = !ed.live.is_empty();
+        draw_agent_view(frame, &ed.agent_view, card_zone, playing);
+        draw_agent(frame, pane, card_zone);
+        draw_trail_band(frame, pane, area);
         draw_toasts(frame, ed, area);
         return;
     }
@@ -3436,48 +3716,65 @@ fn draw_hub(frame: &mut Frame, hub: &mut crate::hub::Hub, zone: ratatui::layout:
     frame.render_widget(Paragraph::new(body), inner);
 }
 
-/// the screen with the agent open: the ide on the left, the agent's column on
-/// the right. each side is drawn by its own code and reads its own buffer, so
-/// the user's text and the agent's text sit side by side and never override.
-fn draw_agent_column(frame: &mut Frame, ed: &mut Editor, area: ratatui::layout::Rect) {
-    fill(frame, area, Style::default().bg(Ed::bg()));
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(30),
-            Constraint::Length(1),
-            Constraint::Min(30),
-        ])
-        .split(area);
-    let ide = cols[0];
-    let agent = cols[2];
-    let inner = draw_box(frame, ide, &[], border_for(ed.focus == Focus::Editor));
-    draw_body(frame, ed, inner);
-    if let Some(pane) = &mut ed.agent_pane {
-        draw_agent_view(frame, &ed.agent_view, agent);
-        draw_agent(frame, pane, agent);
-        // the trail sits in the band under the centred card, where the file
-        // view is not needed; a band too short for it is simply left blank
-        let card_h = agent.height.saturating_sub(4).min(20);
-        let card_bottom = agent.y + (agent.height - card_h) / 2 + card_h;
-        let band = ratatui::layout::Rect {
-            x: agent.x,
-            y: card_bottom,
-            width: agent.width,
-            height: (agent.y + agent.height).saturating_sub(card_bottom),
-        };
-        clear_area(frame, band);
-        draw_trail(frame, pane, band);
-    }
+/// the band under the centred agent card, where the trail is drawn. the card
+/// gives up its bottom rows to the band, so the trail always has room on an
+/// ordinary terminal: a card that filled the screen left no place for it.
+fn agent_layout(zone: ratatui::layout::Rect) -> (ratatui::layout::Rect, ratatui::layout::Rect) {
+    const TRAIL_H: u16 = 12;
+    let body = ratatui::layout::Rect {
+        height: zone.height.saturating_sub(TRAIL_H),
+        ..zone
+    };
+    let card = ratatui::layout::Rect {
+        x: body.x,
+        y: body.y,
+        width: body.width,
+        height: body.height,
+    };
+    let band = ratatui::layout::Rect {
+        x: zone.x,
+        y: zone.y + body.height,
+        width: zone.width,
+        height: zone.height - body.height,
+    };
+    (card, band)
+}
+
+fn draw_trail_band(frame: &mut Frame, pane: &AgentPane, zone: ratatui::layout::Rect) {
+    let (_, band) = agent_layout(zone);
+    clear_area(frame, band);
+    draw_trail(frame, pane, band);
 }
 
 /// the agent's own view of its file: its lines and its cursor, in its own box,
 /// separate from the user's buffer.
-fn draw_agent_view(frame: &mut Frame, view: &AgentView, zone: ratatui::layout::Rect) {
-    let verb = if view.write { "write" } else { "read" };
-    let title = match &view.path {
-        Some(p) => format!(" nana · {verb} {} ", p.display()),
-        None => " nana ".to_string(),
+fn draw_agent_view(
+    frame: &mut Frame,
+    view: &AgentView,
+    zone: ratatui::layout::Rect,
+    playing: bool,
+) {
+    let Some(path) = &view.path else {
+        return;
+    };
+    // a new view sweeps in from the left: its box is only as wide as the sweep
+    // has got so far, so the handover reads as a movement, not a cut
+    let zone = match view.opened {
+        Some(at) if at.elapsed() < VIEW_SWEEP => {
+            let progress = at.elapsed().as_secs_f32() / VIEW_SWEEP.as_secs_f32();
+            let w = ((zone.width as f32) * progress).round().max(4.0) as u16;
+            ratatui::layout::Rect {
+                width: w.min(zone.width),
+                ..zone
+            }
+        }
+        _ => zone,
+    };
+    let title = if path == Path::new(ACTIONS_VIEW) {
+        " nana · agent actions ".to_string()
+    } else {
+        let verb = if view.write { "write" } else { "read" };
+        format!(" nana · {verb} {} ", safe_text(&path.display().to_string()))
     };
     let inner = draw_box(frame, zone, &[(title, Ed::cyan())], Ed::cyan());
     let h = inner.height as usize;
@@ -3489,7 +3786,9 @@ fn draw_agent_view(frame: &mut Frame, view: &AgentView, zone: ratatui::layout::R
         .skip(start)
         .take(h)
         .map(|(i, text)| {
-            let cur = i == view.cy;
+            // the current line is marked only while the agent is writing:
+            // an idle view shows its file, not a place where nothing happens
+            let cur = playing && i == view.cy;
             Line::from(vec![
                 Span::styled(
                     format!("{:>4} ", i + 1),
@@ -3503,6 +3802,52 @@ fn draw_agent_view(frame: &mut Frame, view: &AgentView, zone: ratatui::layout::R
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+    if playing {
+        draw_agent_cursor(frame, view, inner, start);
+    }
+}
+
+/// the agent's cursor: a block right after the last letter it typed. between two
+/// lines it glides down from the line it left, so the eye follows the typing
+/// instead of seeing the cursor jump.
+fn draw_agent_cursor(
+    frame: &mut Frame,
+    view: &AgentView,
+    inner: ratatui::layout::Rect,
+    start: usize,
+) {
+    let line = match view.glide {
+        Some((from, since)) if since.elapsed() < CURSOR_GLIDE => {
+            let t = since.elapsed().as_secs_f32() / CURSOR_GLIDE.as_secs_f32();
+            let (from, to) = (from as f32, view.cy as f32);
+            (from + (to - from) * t).round() as usize
+        }
+        _ => view.cy,
+    };
+    let Some(row) = line.checked_sub(start) else {
+        return;
+    };
+    if row >= inner.height as usize {
+        return;
+    }
+    let typed = view
+        .lines
+        .get(view.cy)
+        .map(|l| drawn_width(l.get(..view.cx).unwrap_or(l)))
+        .unwrap_or(0);
+    // the number gutter is five columns wide: the text starts after it
+    let x = inner.x + 5 + typed as u16;
+    if x >= inner.right() {
+        return;
+    }
+    frame.buffer_mut()[(x, inner.y + row as u16)]
+        .set_style(Style::default().add_modifier(Modifier::REVERSED));
+}
+
+/// how many columns a piece of a line takes once its escapes and tabs are
+/// resolved: the cursor and the scroll must agree with what the cells show.
+fn drawn_width(prefix: &str) -> usize {
+    safe_text(prefix).chars().count()
 }
 
 /// the agent's trail, drawn behind its card: one row per lane over the time of
@@ -3568,34 +3913,25 @@ fn draw_agent(frame: &mut Frame, pane: &mut AgentPane, zone: ratatui::layout::Re
     };
     let inner = draw_box(frame, float, &[(title, Ed::cyan())], Ed::cyan());
 
+    // the prompt wraps on the card's width, one row per visual line; it may
+    // take up to half the card, and its last rows stay in view
+    let prompt_rows = prompt_lines(&pane.input, inner.width as usize);
+    let prompt_h = prompt_rows
+        .len()
+        .clamp(1, (inner.height as usize / 2).max(1));
+    let shown_prompt = &prompt_rows[prompt_rows.len() - prompt_h..];
+
     // transcript, wrapped, newest at the bottom
-    let body_h = inner.height.saturating_sub(2) as usize;
-    let mut rendered: Vec<Line> = Vec::new();
-    for (kind, text) in &pane.lines {
-        let (label, color) = match kind.as_str() {
-            "you" => ("you  ", Ed::accent()),
-            "agent" => ("nana ", Ed::cyan()),
-            "tool" => ("->   ", Ed::amber()),
-            "ok" => ("ok   ", Ed::green()),
-            "refused" => ("no   ", Ed::red()),
-            "error" => ("err  ", Ed::red()),
-            _ => ("     ", Ed::gutter()),
-        };
-        let mut first = true;
-        for chunk in wrap(text, inner.width.saturating_sub(6) as usize) {
-            rendered.push(Line::from(vec![
-                Span::styled(
-                    if first { label } else { "     " },
-                    Style::default().fg(color),
-                ),
-                Span::styled(chunk, Style::default().fg(Ed::text())),
-            ]));
-            first = false;
-        }
-    }
-    let start = rendered.len().saturating_sub(body_h + pane.scroll);
-    let end = (start + body_h).min(rendered.len());
-    let view: Vec<Line> = rendered[start..end].to_vec();
+    let body_h = (inner.height as usize).saturating_sub(prompt_h + 1);
+    // the rows are wrapped only when a line is new (see TranscriptRows), so a
+    // frame costs the same at the first line as at the thousandth
+    let total = pane.rendered_rows(inner.width as usize).len();
+    // the scroll is clamped to what the transcript holds, so scrolling back
+    // down always moves at once instead of first unwinding a runaway count
+    pane.scroll = pane.scroll.min(total.saturating_sub(body_h));
+    let start = total.saturating_sub(body_h + pane.scroll);
+    let end = (start + body_h).min(total);
+    let view: Vec<Line> = pane.transcript.rows[start..end].to_vec();
     frame.render_widget(
         Paragraph::new(view),
         ratatui::layout::Rect {
@@ -3604,23 +3940,58 @@ fn draw_agent(frame: &mut Frame, pane: &mut AgentPane, zone: ratatui::layout::Re
         },
     );
 
-    // the prompt line sits at the bottom of the card
-    let prompt = Line::from(vec![
-        Span::styled("> ", Style::default().fg(Ed::accent())),
-        Span::styled(pane.input.clone(), Style::default().fg(Ed::text())),
-        Span::styled(
-            if pane.busy { "…" } else { "_" },
-            Style::default().fg(if pane.busy { Ed::amber() } else { Ed::cyan() }),
-        ),
-    ]);
+    // the prompt sits at the bottom of the card, its cursor after the last letter
+    let last = shown_prompt.len() - 1;
+    let prompt: Vec<Line> = shown_prompt
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let lead = if i == 0 { "> " } else { "  " };
+            let mut spans = vec![
+                Span::styled(lead, Style::default().fg(Ed::accent())),
+                Span::styled(row.clone(), Style::default().fg(Ed::text())),
+            ];
+            if i == last {
+                spans.push(Span::styled(
+                    if pane.busy { "..." } else { "_" },
+                    Style::default().fg(if pane.busy { Ed::amber() } else { Ed::cyan() }),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect();
     frame.render_widget(
         Paragraph::new(prompt),
         ratatui::layout::Rect {
-            y: inner.bottom().saturating_sub(1),
-            height: 1,
+            y: inner.bottom().saturating_sub(prompt_h as u16),
+            height: prompt_h as u16,
             ..inner
         },
     );
+}
+
+/// the prompt cut into rows that fit `width` columns: a line break starts a
+/// new row, and a long line is cut where it no longer fits. one column stays
+/// free for the cursor. the card shows the newest rows, so nothing is cut
+/// with dots.
+fn prompt_lines(input: &str, width: usize) -> Vec<String> {
+    let width = width.saturating_sub(3).max(1);
+    let mut rows = Vec::new();
+    for paragraph in input.split('\n') {
+        let mut cur = String::new();
+        let mut used = 0;
+        for ch in paragraph.chars() {
+            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + w > width && !cur.is_empty() {
+                rows.push(std::mem::take(&mut cur));
+                used = 0;
+            }
+            cur.push(ch);
+            used += w;
+        }
+        rows.push(cur);
+    }
+    rows
 }
 
 /// Cut `text` to `width` columns. A cut row ends in « … » so the reader sees
@@ -4292,10 +4663,9 @@ fn draw_body(frame: &mut Frame, ed: &Editor, zone: ratatui::layout::Rect) {
             }
             if n < ed.lines.len() {
                 let raw = &ed.lines[n];
-                // tabs are expanded before anything is measured or drawn
-                let expanded = expand_tabs(raw);
-                let start = visual_col(raw, ed.scroll_x);
-                let visible: String = expanded.chars().skip(start).collect();
+                // cleaned and tab-expanded before anything is measured or drawn
+                let start = drawn_width(&raw.chars().take(ed.scroll_x).collect::<String>());
+                let visible: String = safe_text(raw).chars().skip(start).collect();
                 let mut spans = render_line(&visible, Ed::dim(), &ed.ext);
                 // première ligne du fantôme : à la suite de la ligne du curseur
                 if n == ed.cy && ghost_len > 0 {
@@ -4350,12 +4720,12 @@ fn draw_body(frame: &mut Frame, ed: &Editor, zone: ratatui::layout::Rect) {
         let col = ed
             .lines
             .get(ed.cy)
-            .map(|l| visual_col(l, ed.cx))
+            .map(|l| drawn_width(l.get(..ed.cx).unwrap_or(l)))
             .unwrap_or(ed.cx);
         let origin = ed
             .lines
             .get(ed.cy)
-            .map(|l| visual_col(l, ed.scroll_x))
+            .map(|l| drawn_width(&l.chars().take(ed.scroll_x).collect::<String>()))
             .unwrap_or(ed.scroll_x);
         let cur_x = body[1].x + col.saturating_sub(origin) as u16;
         let cur_y = body[1].y + (ed.cy - ed.scroll_y) as u16;
@@ -5475,29 +5845,58 @@ mod hub_ui_tests {
 mod float_tests {
     use super::*;
 
-    /// the agent card does not paint over the user's text: the editor is drawn
-    /// in its own column, and the agent card sits in the other one.
+    /// the agent card floats on a clean screen, like the hub and the search:
+    /// the ide is not drawn behind it, so nothing of the user's text reads
+    /// through the card.
     #[test]
-    fn the_agent_card_never_paints_over_the_user_text() {
+    fn the_agent_card_floats_on_a_clean_screen() {
         let mut ed = Editor::open(None).unwrap();
         ed.lines = (0..20)
-            .map(|i| format!("SECRET_LINE_{i}_SHOULD_SHOW_IN_IDE"))
+            .map(|i| format!("SECRET_LINE_{i}_SHOULD_NOT_SHOW"))
             .collect();
         ed.file = Some(std::path::PathBuf::from("x.py"));
         ed.ext = "py".into();
         ed.modified = true;
         ed.agent_pane = Some(AgentPane::new());
-        let rows = render_rows(&mut ed, 160, 40);
-        let card_row = rows
-            .iter()
-            .position(|r| r.contains("╭─ agent"))
-            .expect("the card is drawn");
-        let text = rows.join("\n");
+        let text = render_text(&mut ed, 160, 40);
+        assert!(text.contains("╭─ agent"), "the card is drawn:\n{text}");
         assert!(
-            text.contains("SECRET_LINE_0_SHOULD_SHOW_IN_IDE"),
-            "the user's text is still on screen beside the agent:\n{text}"
+            !text.contains("SECRET_LINE_0_SHOULD_NOT_SHOW"),
+            "the ide is not drawn behind the card:\n{text}"
         );
-        assert!(card_row > 0);
+    }
+
+    /// the agent's write plays in a second view behind the card: the lines it
+    /// writes are on screen, outside the card, and the card stays clean.
+    #[test]
+    fn the_agent_write_plays_in_a_view_behind_the_card() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: PathBuf::from("src/lib.rs"),
+            text: vec!["fn behind_the_card() {}".into()],
+            shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
+            write: true,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        while !ed.live.is_empty() {
+            ed.play_live();
+        }
+        std::thread::sleep(VIEW_SWEEP);
+        let text = render_text(&mut ed, 160, 40);
+        assert!(text.contains("╭─ agent"), "the card is drawn:\n{text}");
+        assert!(
+            text.contains("fn behind_the_card"),
+            "the write plays behind the card:\n{text}"
+        );
+        assert!(
+            text.contains("write src/lib.rs"),
+            "the view names the file it writes:\n{text}"
+        );
     }
 
     /// the search is a window on its own too: the editor behind it must not
@@ -5520,10 +5919,34 @@ mod float_tests {
         );
     }
 
-    /// the agent's trail is still listed for the user, and the ide stays on
-    /// screen beside the card: nothing is erased to show what the agent did.
+    /// on an ordinary terminal (80x24, 120x30) the trail must still be on
+    /// screen: a card that takes every row leaves the trail with nothing to
+    /// draw in, and the user sees no trail at all.
     #[test]
-    fn the_agent_trail_is_listed_and_the_ide_stays_visible() {
+    fn the_agent_trail_is_visible_on_an_ordinary_terminal() {
+        for (w, h) in [(80u16, 24u16), (120, 30)] {
+            let mut ed = Editor::open(None).unwrap();
+            let mut pane = AgentPane::new();
+            pane.trail.push(crate::trail::Step {
+                lane: crate::trail::Lane::Tool,
+                label: "read_file src/main.rs".into(),
+                at: 0.0,
+                ok: true,
+            });
+            ed.agent_pane = Some(pane);
+            let text = render_text(&mut ed, w, h);
+            assert!(text.contains("╭─ agent"), "the card is drawn at {w}x{h}");
+            assert!(
+                text.contains("read_file src/main.rs"),
+                "the trail is drawn at {w}x{h}:\n{text}"
+            );
+        }
+    }
+
+    /// the agent's trail is drawn under the card, and the ide stays off the
+    /// screen like it does for the card alone.
+    #[test]
+    fn the_agent_trail_is_drawn_under_a_clean_card() {
         let mut ed = Editor::open(None).unwrap();
         ed.lines = (0..20)
             .map(|i| format!("SECRET_LINE_{i}_STAYS_VISIBLE"))
@@ -5547,8 +5970,8 @@ mod float_tests {
         let text = render_text(&mut ed, 160, 40);
         assert!(text.contains("╭─ agent"), "the card is drawn");
         assert!(
-            text.contains("SECRET_LINE_0_STAYS_VISIBLE"),
-            "the ide stays on screen:\n{text}"
+            !text.contains("SECRET_LINE_0_STAYS_VISIBLE"),
+            "the ide is not drawn behind the card:\n{text}"
         );
         assert!(
             text.contains("tool "),
@@ -5651,10 +6074,10 @@ mod tab_tests {
 
     #[test]
     fn the_cursor_column_follows_the_expansion() {
-        assert_eq!(visual_col("a\tb", 1), 1);
-        assert_eq!(visual_col("a\tb", 2), 4);
-        assert_eq!(visual_col("ab\tc", 3), 4);
-        assert_eq!(visual_col("plain", 3), 3);
+        assert_eq!(drawn_width("a"), 1);
+        assert_eq!(drawn_width("a\t"), 4);
+        assert_eq!(drawn_width("ab\t"), 4);
+        assert_eq!(drawn_width("pla"), 3);
     }
 
     /// A tab must never reach a cell: the terminal would move its own cursor
@@ -6280,6 +6703,9 @@ mod live_write_tests {
                 "fn three() {}".into(),
             ],
             shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
             write: true,
         });
         ed.agent_pane = Some(pane);
@@ -6291,11 +6717,11 @@ mod live_write_tests {
         );
         ed.play_live();
         let text = render_text(&mut ed, 160, 40);
-        assert!(text.contains("fn one() {}"), "one line after one step");
-        assert!(!text.contains("fn two() {}"), "one line at a time");
-        ed.play_live();
-        ed.play_live();
-        ed.play_live();
+        assert!(!text.contains("fn one() {}"), "one letter after one step");
+        while !ed.live.is_empty() {
+            ed.play_live();
+        }
+        std::thread::sleep(VIEW_SWEEP);
         let text = render_text(&mut ed, 160, 40);
         assert!(
             text.contains("fn three() {}"),
@@ -6314,7 +6740,7 @@ mod live_write_tests {
     /// the user's text and the agent's text are both on screen at once: the
     /// agent column sits beside the editor, neither one overrides the other.
     #[test]
-    fn the_user_text_and_the_agent_text_are_on_screen_together() {
+    fn the_agent_text_is_on_screen_and_the_user_text_is_not() {
         let d = scratch("live-side");
         let mut ed = Editor::open(None).unwrap();
         ed.file = Some(d.join("mine.rs"));
@@ -6324,22 +6750,31 @@ mod live_write_tests {
             path: d.join("new.rs"),
             text: vec!["AGENT_TEXT_SHOWS".into()],
             shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
             write: true,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
-        ed.play_live();
+        while !ed.live.is_empty() {
+            ed.play_live();
+        }
+        std::thread::sleep(VIEW_SWEEP);
         let rows = render_rows(&mut ed, 160, 40);
         assert!(
             rows.iter()
                 .any(|r| r.contains("USER_TEXT_STAYS") || r.contains("AGENT_TEXT_SHOWS")),
             "{rows:?}"
         );
+        let all = rows.join("\n");
         assert!(
-            rows.iter()
-                .any(|r| r.contains("USER_TEXT_STAYS") && r.contains("AGENT_TEXT_SHOWS")),
-            "the two views are side by side on one row:\n{}",
-            rows.join("\n")
+            all.contains("AGENT_TEXT_SHOWS"),
+            "the agent's write plays in the background view:\n{all}"
+        );
+        assert!(
+            !all.contains("USER_TEXT_STAYS"),
+            "the user's buffer is not drawn behind the card:\n{all}"
         );
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -6358,6 +6793,9 @@ mod live_write_tests {
             path: target.clone(),
             text: vec!["alpha".into(), "beta".into()],
             shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
             write: false,
         });
         ed.agent_pane = Some(pane);
@@ -6365,12 +6803,16 @@ mod live_write_tests {
         ed.play_live();
         assert_eq!(
             ed.agent_view.lines,
-            vec!["alpha".to_string()],
-            "the read appears one line at a time in the agent view"
+            vec!["a".to_string()],
+            "the read appears one letter at a time in the agent view"
         );
-        ed.play_live();
-        ed.play_live();
-        assert_eq!(ed.agent_view.lines.len(), 2);
+        while !ed.live.is_empty() {
+            ed.play_live();
+        }
+        assert_eq!(
+            ed.agent_view.lines,
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
         assert!(ed.live.is_empty(), "the read is over");
         assert_eq!(
             ed.lines,
@@ -6397,6 +6839,8 @@ mod live_write_tests {
             cy: 0,
             cx: 0,
             write: false,
+            opened: None,
+            glide: None,
         };
         let text = render_text(&mut ed, 160, 40);
         assert!(text.contains("read"), "a read is named:\n{text}");
@@ -6418,11 +6862,16 @@ mod live_write_tests {
             path: d.join("theirs.txt"),
             text: vec!["something else".into()],
             shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
             write: false,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
-        ed.play_live();
+        while !ed.live.is_empty() {
+            ed.play_live();
+        }
         assert_eq!(
             ed.lines,
             vec!["my unsaved line".to_string()],
@@ -6470,5 +6919,637 @@ mod hub_truncation_tests {
             rows.iter().any(|r| r.contains("…")),
             "a cut row has no ellipsis:\n{text}"
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_view_tests {
+    use super::*;
+
+    fn rows(ed: &mut Editor, w: u16, h: u16) -> Vec<String> {
+        render_rows(ed, w, h)
+    }
+
+    /// the agent's view is drawn above the trail band, so its own bottom
+    /// border is on screen: the trail used to paint over it.
+    #[test]
+    fn the_agent_view_keeps_its_bottom_border_above_the_trail() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: PathBuf::from("src/lib.rs"),
+            text: vec!["fn a() {}".into()],
+            shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
+            write: true,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        ed.play_live();
+        ed.play_live();
+        let screen = rows(&mut ed, 120, 40);
+        let band_top = 40 - 12;
+        assert!(
+            screen[band_top - 1].starts_with('╰'),
+            "the view has no bottom border above the trail:\n{}",
+            screen.join("\n")
+        );
+    }
+
+    /// every action of the agent is played in the live view, not only the file
+    /// writes: a memory listing or a memory page it opened is on screen too.
+    #[test]
+    fn a_memory_listing_and_a_memory_page_are_played_in_the_live_view() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        let (tx, rx) = channel();
+        pane.rx = Some(rx);
+        tx.send(crate::agent::Event::ToolCall {
+            name: "memory_list".into(),
+            args: serde_json::json!({}),
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::ToolResult {
+            name: "memory_list".into(),
+            ok: true,
+            text: "project: stack\nuser: tone".into(),
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::ToolCall {
+            name: "memory_read".into(),
+            args: serde_json::json!({"class": "project", "name": "stack"}),
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::ToolResult {
+            name: "memory_read".into(),
+            ok: true,
+            text: "# stack\n\nrust, no async".into(),
+        })
+        .unwrap();
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        assert_eq!(ed.live.len(), 2, "each memory action must be played");
+        let mut guard = 0;
+        while !ed.live.is_empty() && guard < 10_000 {
+            ed.play_live();
+            guard += 1;
+        }
+        let shown = ed.agent_view.lines.join("\n");
+        assert!(
+            shown.contains("memory_list"),
+            "the listing call is not shown:\n{shown}"
+        );
+        assert!(
+            shown.contains("project: stack"),
+            "the listing is not shown:\n{shown}"
+        );
+        assert!(
+            shown.contains("rust, no async"),
+            "the opened page is not shown:\n{shown}"
+        );
+    }
+
+    /// a file change made by a tool that is not a plain write (edit_file) is
+    /// played too, so no change of the agent happens off screen.
+    #[test]
+    fn an_edit_is_played_in_the_live_view() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        let (tx, rx) = channel();
+        pane.rx = Some(rx);
+        tx.send(crate::agent::Event::ToolCall {
+            name: "edit_file".into(),
+            args: serde_json::json!({"path": "src/lib.rs", "find": "a", "replace": "b"}),
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::ToolResult {
+            name: "edit_file".into(),
+            ok: true,
+            text: "edited src/lib.rs".into(),
+        })
+        .unwrap();
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        assert_eq!(ed.live.len(), 1, "the edit is not played in the live view");
+    }
+
+    /// the transcript is wrapped once, when a line arrives, and not again on
+    /// every frame: a long conversation used to cost more each keystroke.
+    /// the cached rows must match a full wrap, so the screen does not change.
+    #[test]
+    fn the_transcript_is_wrapped_once_per_line_not_on_every_frame() {
+        let mut pane = AgentPane::new();
+        for i in 0..50 {
+            pane.lines.push((
+                "agent".into(),
+                format!("answer {i} with several words to wrap"),
+            ));
+        }
+        let text = |rows: &[Line]| -> Vec<String> {
+            rows.iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect()
+        };
+        let first = text(pane.rendered_rows(24));
+        assert_eq!(pane.transcript.wrapped, 51, "every line is wrapped once");
+        let again = text(pane.rendered_rows(24));
+        assert_eq!(
+            pane.transcript.wrapped, 51,
+            "a frame with no new line wraps nothing"
+        );
+        assert_eq!(first, again);
+        pane.lines.push(("you".into(), "one more".into()));
+        let grown = text(pane.rendered_rows(24));
+        assert_eq!(pane.transcript.wrapped, 52, "only the new line is wrapped");
+        assert!(grown.len() > first.len());
+        pane.transcript = TranscriptRows::default();
+        assert_eq!(
+            text(pane.rendered_rows(24)),
+            grown,
+            "a full wrap gives the same rows as the cache"
+        );
+    }
+
+    /// the agent types one letter per tick, like a person coding: the cursor
+    /// sits after the last letter on screen, never a whole line at once.
+    #[test]
+    fn the_agent_writes_one_letter_per_tick() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: PathBuf::from("src/lib.rs"),
+            text: vec!["abc".into()],
+            shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
+            write: true,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        ed.play_live();
+        assert_eq!(ed.agent_view.lines, vec!["a".to_string()], "one letter");
+        assert_eq!(ed.agent_view.cx, 1, "the cursor follows the letter");
+        ed.play_live();
+        assert_eq!(ed.agent_view.lines, vec!["ab".to_string()], "two letters");
+        ed.play_live();
+        ed.play_live();
+        assert!(ed.live.is_empty(), "the line is whole, the write is over");
+        assert_eq!(ed.agent_view.lines, vec!["abc".to_string()]);
+    }
+
+    /// a write with a set duration lands in exactly that many ticks, however
+    /// long its text is: the pace stretches to the time it was given.
+    #[test]
+    fn a_write_lasts_exactly_the_ticks_it_is_given() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: PathBuf::from("src/lib.rs"),
+            text: vec!["abcdefghij".into()],
+            shown: 0,
+            col: 0,
+            ticks: 5,
+            elapsed: 0,
+            write: true,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        ed.play_live();
+        assert_eq!(
+            ed.agent_view.lines,
+            vec!["ab".to_string()],
+            "2 of 10 in tick 1"
+        );
+        for _ in 0..3 {
+            ed.play_live();
+        }
+        assert_eq!(ed.live.len(), 1, "still writing after 4 ticks of 5");
+        ed.play_live();
+        assert!(ed.live.is_empty(), "the write ends on tick 5");
+        assert_eq!(ed.agent_view.lines, vec!["abcdefghij".to_string()]);
+    }
+
+    /// the playback is a view of work that goes on: when the user leaves the
+    /// agent's view to do something else, the playback stops at once rather
+    /// than running on behind their back.
+    #[test]
+    fn the_agent_playback_stops_when_the_card_closes() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: PathBuf::from("src/lib.rs"),
+            text: vec!["abcdefghij".into()],
+            shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
+            write: true,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        ed.play_live();
+        ed.agent_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(ed.agent_pane.is_none(), "the card closed");
+        assert!(ed.live.is_empty(), "the playback stopped with the card");
+        assert_eq!(
+            ed.agent_view.lines,
+            vec!["a".to_string()],
+            "what was shown stays"
+        );
+    }
+
+    /// opening a file from the explorer is leaving the agent's view: the
+    /// playback stops, and the file the user opens is the one they see.
+    #[test]
+    fn the_agent_playback_stops_when_a_file_is_opened_from_the_explorer() {
+        let d = scratch("live-interrupt-explorer");
+        let file = d.join("notes.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: PathBuf::from("src/lib.rs"),
+            text: vec!["abcdefghij".into()],
+            shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
+            write: true,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        ed.play_live();
+        ed.open_from_explorer(file);
+        assert!(ed.live.is_empty(), "the explorer open stops the playback");
+        assert_eq!(
+            ed.lines,
+            vec!["hello".to_string()],
+            "the user's file is shown"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// once the agent stops writing, its view shows no current line: the
+    /// line number of the last line is drawn like the others.
+    #[test]
+    fn the_agent_view_has_no_cursor_when_the_agent_is_idle() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: PathBuf::from("src/lib.rs"),
+            text: vec!["fn a() {}".into(), "fn b() {}".into()],
+            shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
+            write: true,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        while !ed.live.is_empty() {
+            ed.play_live();
+        }
+        // the view sweeps in before it is read: look at it once it has landed
+        std::thread::sleep(VIEW_SWEEP);
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, &mut ed)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let row = (0..40u16)
+            .find(|&y| {
+                (0..120u16)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("fn b() {}")
+            })
+            .expect("the last line is drawn");
+        let number = buf[(3, row)].fg;
+        assert_eq!(
+            number,
+            Ed::gutter(),
+            "the idle agent shows a cursor on its last line"
+        );
+    }
+
+    /// wheeling the transcript up is clamped to what it holds, so one more
+    /// Down always scrolls back: the counter does not run away.
+    #[test]
+    fn the_agent_transcript_scroll_stops_at_the_top() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.lines.push(("agent".into(), "une seule ligne".into()));
+        pane.scroll = 500;
+        ed.agent_pane = Some(pane);
+        let _ = rows(&mut ed, 120, 40);
+        let scroll = ed.agent_pane.as_ref().unwrap().scroll;
+        assert!(scroll < 20, "the scroll ran away to {scroll}");
+    }
+
+    /// the agent took a while to reach a write: the write lasts as long, so the
+    /// reader watches it land in the time the agent actually spent.
+    #[test]
+    fn a_write_lasts_as_long_as_the_agent_took_to_reach_it() {
+        let mut pane = AgentPane::new();
+        let (tx, rx) = channel();
+        pane.rx = Some(rx);
+        pane.last_event = Instant::now() - Duration::from_millis(3000);
+        tx.send(crate::agent::Event::ToolCall {
+            name: "write_file".into(),
+            args: serde_json::json!({"path": "src/lib.rs", "content": "fn a() {}"}),
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::File {
+            path: "src/lib.rs".into(),
+            content: "fn a() {}".into(),
+            write: true,
+        })
+        .unwrap();
+        pane.poll();
+        let ticks = pane.writes[0].ticks;
+        assert!(
+            (187..=190).contains(&ticks),
+            "3 s at one tick per 16 ms: {ticks} ticks"
+        );
+    }
+
+    /// a new view sweeps in from the left as the card hands over to a file:
+    /// half-way, its rounded edge sits mid-card and nothing is drawn past it.
+    #[test]
+    fn the_view_sweeps_in_from_the_left() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.agent_pane = Some(AgentPane::new());
+        ed.agent_view = AgentView {
+            path: Some(PathBuf::from("b.rs")),
+            lines: vec!["two".into()],
+            cy: 0,
+            cx: 3,
+            write: true,
+            opened: Some(Instant::now() - VIEW_SWEEP / 2),
+            glide: None,
+        };
+        let rows = render_rows(&mut ed, 120, 40);
+        let edge = rows[0]
+            .chars()
+            .position(|c| c == '╮')
+            .expect("the sweep has a rounded edge");
+        // half-way is 60 columns of the 120: the edge lands past mid-card but
+        // well short of the far side, whatever the frame's exact timing
+        assert!(
+            (50..=80).contains(&edge),
+            "the edge is not mid-card, at {edge}: {}",
+            rows[0]
+        );
+        assert!(
+            rows[0].chars().skip(edge + 1).all(|c| c == ' '),
+            "the view is drawn past the sweep: {}",
+            rows[0]
+        );
+    }
+}
+
+#[cfg(test)]
+mod glitch_safety_tests {
+    use super::*;
+
+    fn reversed_cells(ed: &mut Editor, w: u16, h: u16) -> Vec<(u16, u16)> {
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, ed)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)].modifier.contains(Modifier::REVERSED))
+            .collect()
+    }
+
+    /// a tab, a carriage return, an escape sequence or a zero-width mark in
+    /// text from the agent is not printed: the terminal would act on it.
+    #[test]
+    fn safe_text_keeps_the_letters_and_drops_every_byte_a_terminal_acts_on() {
+        assert_eq!(
+            safe_text("a\tb"),
+            "a   b",
+            "a tab becomes spaces to the next stop"
+        );
+        assert_eq!(
+            safe_text("x\r\u{7}y"),
+            "xy",
+            "carriage return and bell are dropped"
+        );
+        assert_eq!(
+            safe_text("\x1b[31mred\x1b[0m"),
+            "red",
+            "colour codes go whole"
+        );
+        assert_eq!(
+            safe_text("\x1b]0;title\x07ok"),
+            "ok",
+            "window titles go whole"
+        );
+        assert_eq!(
+            safe_text("e\u{200d}\u{fe0f}!"),
+            "e!",
+            "zero-width marks are dropped"
+        );
+        assert_eq!(
+            safe_text("ok\nnext"),
+            "ok\nnext",
+            "a line break separates lines"
+        );
+    }
+
+    /// the agent's answers, file contents and tool outputs, all dirty, put
+    /// nothing that is a control byte on the screen, and the text still shows.
+    #[test]
+    fn the_agent_screen_never_holds_a_control_byte() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        let (tx, rx) = channel();
+        pane.rx = Some(rx);
+        tx.send(crate::agent::Event::File {
+            path: "src/b\tc.rs".into(),
+            content: "fn b() {\r\n\tlet y = 1;\r\n}\r\n".into(),
+            write: true,
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::ToolCall {
+            name: "run_shell".into(),
+            args: serde_json::json!({"command": "cargo build"}),
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::ToolResult {
+            name: "run_shell".into(),
+            ok: true,
+            text: "src/a.rs:3:\tlet x\r\n\x1b[31mred\x1b[0m done\u{7}\u{200d}".into(),
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::Text("plain\tsaid\x1b[2J".into()))
+            .unwrap();
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        let mut guard = 0;
+        while !ed.live.is_empty() && guard < 10_000 {
+            ed.play_live();
+            guard += 1;
+        }
+        std::thread::sleep(VIEW_SWEEP);
+        let text = render_text(&mut ed, 160, 40);
+        let bad: Vec<char> = text.chars().filter(|c| c.is_control()).collect();
+        assert!(bad.is_empty(), "control bytes reached a cell: {bad:?}");
+        assert!(text.contains("red done"), "the text still shows:\n{text}");
+    }
+
+    /// the user's own buffer is held to the same rule: a lone carriage return
+    /// or an escape in a file never reaches the terminal.
+    #[test]
+    fn the_user_buffer_never_holds_a_control_byte_either() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.lines = vec!["a\rb\x1b[2Jc\u{200d}d".into()];
+        ed.modified = true;
+        let text = render_text(&mut ed, 100, 30);
+        let bad: Vec<char> = text.chars().filter(|c| c.is_control()).collect();
+        assert!(bad.is_empty(), "control bytes reached a cell: {bad:?}");
+        assert!(text.contains("abcd"), "the visible text is kept:\n{text}");
+    }
+
+    /// the agent's cursor is a block drawn right after the last letter it
+    /// typed: that is what makes the write read as a person typing.
+    #[test]
+    fn the_agent_cursor_sits_after_the_last_letter_it_wrote() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: PathBuf::from("src/lib.rs"),
+            text: vec!["abc".into()],
+            shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
+            write: true,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        ed.play_live();
+        ed.play_live();
+        std::thread::sleep(VIEW_SWEEP);
+        // the number gutter is 5 columns, the box border one: the text starts at x 6
+        assert_eq!(reversed_cells(&mut ed, 160, 40), vec![(8, 1)]);
+    }
+
+    /// the cursor does not jump: when the agent moves to the next line, it
+    /// glides down from the line it left, and lands on the new line.
+    #[test]
+    fn the_cursor_glides_from_the_line_it_left_to_the_next() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.agent_pane = Some(AgentPane::new());
+        ed.agent_view = AgentView {
+            path: Some(PathBuf::from("src/lib.rs")),
+            lines: vec!["one".into(), "two".into(), "three".into()],
+            cy: 2,
+            cx: 0,
+            write: true,
+            opened: Some(Instant::now() - VIEW_SWEEP * 2),
+            glide: Some((0, Instant::now() - CURSOR_GLIDE / 2)),
+        };
+        ed.live.push(LiveWrite {
+            path: PathBuf::from("src/lib.rs"),
+            text: vec!["x".into()],
+            shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
+            write: true,
+        });
+        // half-way: between line 1 (row 1) and line 3 (row 3), so on row 2
+        assert_eq!(reversed_cells(&mut ed, 160, 40), vec![(6, 2)]);
+        ed.agent_view.glide = None;
+        assert_eq!(reversed_cells(&mut ed, 160, 40), vec![(6, 3)]);
+    }
+
+    /// playing a write that goes to a new line starts a glide from the line
+    /// the cursor left.
+    #[test]
+    fn a_new_line_starts_a_glide_from_the_old_one() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: PathBuf::from("src/lib.rs"),
+            text: vec!["abc".into(), "def".into()],
+            shown: 0,
+            col: 0,
+            ticks: 0,
+            elapsed: 0,
+            write: true,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        let mut guard = 0;
+        while ed.agent_view.cy == 0 && !ed.live.is_empty() && guard < 100 {
+            ed.play_live();
+            guard += 1;
+        }
+        assert_eq!(ed.agent_view.cy, 1, "the cursor reached the second line");
+        assert_eq!(ed.agent_view.glide.map(|(from, _)| from), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod agent_input_tests {
+    use super::*;
+
+    /// a paste while the agent card is open goes into its prompt, newlines
+    /// included, and never into the user's buffer behind the card.
+    #[test]
+    fn a_paste_lands_in_the_agent_prompt() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.agent_pane = Some(AgentPane::new());
+        let before = ed.lines.clone();
+        ed.paste("first line\nsecond line");
+        assert_eq!(
+            ed.agent_pane.as_ref().unwrap().input,
+            "first line\nsecond line",
+            "the pasted text is in the prompt"
+        );
+        assert_eq!(ed.lines, before, "the user's buffer is untouched");
+    }
+
+    /// a long prompt wraps on the card instead of running off its right edge.
+    #[test]
+    fn a_long_prompt_wraps_on_several_lines_inside_the_card() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.input = "alpha beta gamma delta epsilon zeta eta theta iota kappa".into();
+        ed.agent_pane = Some(pane);
+        let rows = render_rows(&mut ed, 60, 24);
+        let joined = rows.join("\n");
+        assert!(
+            joined.contains("alpha beta"),
+            "the start is shown:\n{joined}"
+        );
+        assert!(joined.contains("kappa"), "the end is shown too:\n{joined}");
+        assert!(
+            !joined.contains("..."),
+            "nothing is cut with dots:\n{joined}"
+        );
+    }
+
+    /// a pasted block of several lines shows each line on its own row.
+    #[test]
+    fn a_multi_line_prompt_shows_every_line() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.input = "one\ntwo\nthree".into();
+        ed.agent_pane = Some(pane);
+        let rows = render_rows(&mut ed, 80, 24);
+        let joined = rows.join("\n");
+        for word in ["one", "two", "three"] {
+            assert!(joined.contains(word), "{word} is shown:\n{joined}");
+        }
+        let row_of = |w: &str| rows.iter().position(|r| r.contains(w)).unwrap();
+        assert!(row_of("one") < row_of("two"), "lines keep their order");
+        assert!(row_of("two") < row_of("three"), "lines keep their order");
     }
 }
