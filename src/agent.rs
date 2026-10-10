@@ -40,6 +40,13 @@ pub enum Event {
         ok: bool,
         text: String,
     },
+    /// a file the agent is about to write or has just read, with its text: the
+    /// ui plays it back line by line, so the work is seen as it happens.
+    File {
+        path: String,
+        content: String,
+        write: bool,
+    },
     Finished {
         steps: usize,
     },
@@ -281,6 +288,9 @@ impl Agent {
                     name: call.name.clone(),
                     args: call.args.clone(),
                 });
+                if let Some((path, content, write)) = file_event(&call.name, &call.args) {
+                    on(Event::File { path, content, write });
+                }
                 let result = tools::run(&call.name, &call.args, &self.ctx);
                 let (ok, text) = match result {
                     Ok(t) => (true, t),
@@ -327,6 +337,19 @@ impl Agent {
         {
             let _ = f.write_all(text.as_bytes());
         }
+    }
+}
+
+/// the file a tool is about to touch, with the text it will write. only the
+/// writes are shown before they land: a read shows what the tool returns.
+fn file_event(name: &str, args: &Value) -> Option<(String, String, bool)> {
+    match name {
+        "write_file" => Some((
+            args.get("path")?.as_str()?.to_string(),
+            args.get("content")?.as_str()?.to_string(),
+            true,
+        )),
+        _ => None,
     }
 }
 
@@ -579,6 +602,33 @@ mod tests {
         assert!(log.contains("\"role\":\"user\""), "{log}");
         assert!(log.contains("\"role\":\"tool\""), "{log}");
         assert!(log.contains("rutabaga"), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_file_write_is_announced_with_its_text_before_it_lands() {
+        let d = tmp("live");
+        let body = "fn one() {}\nfn two() {}";
+        let args = serde_json::json!({"path": "src/new.rs", "content": body}).to_string();
+        let reply = serde_json::json!({"choices":[{"message":{"content":"","tool_calls":[
+            {"id":"c1","type":"function","function":{"name":"write_file","arguments": args}}]}}]})
+        .to_string();
+        let (url, server) = scripted(vec![
+            reply,
+            r#"{"choices":[{"message":{"content":"done"}}]}"#.to_string(),
+        ]);
+        let mut a = agent_at(&d, &url);
+        let mut events = Vec::new();
+        a.run("write it", |e| events.push(e)).unwrap();
+        let _ = server.join();
+        let file = events
+            .iter()
+            .find_map(|e| match e {
+                Event::File { path, content, write } => Some((path.clone(), content.clone(), *write)),
+                _ => None,
+            })
+            .expect("the write is announced");
+        assert_eq!(file, ("src/new.rs".to_string(), body.to_string(), true));
         let _ = std::fs::remove_dir_all(&d);
     }
 

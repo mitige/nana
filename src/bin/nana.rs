@@ -711,6 +711,11 @@ fn run_agent(root: &Path, rest: &[String]) -> i32 {
                 );
             }
         }
+        agent::Event::File { path, .. } => {
+            if !quiet {
+                eprintln!("✎ {path}");
+            }
+        }
         agent::Event::Finished { steps } => {
             if !quiet {
                 eprintln!("done in {steps} step(s) — transcript {}", session.display());

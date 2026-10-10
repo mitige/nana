@@ -14,6 +14,7 @@ use crate::memory::{Class, Memory};
 use crate::persona;
 use crate::settings::{self, Settings};
 use crate::skills;
+use crate::world;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,22 +25,25 @@ pub enum Section {
     Skills,
     Personas,
     Agents,
+    World,
 }
 
 impl Section {
-    pub const ALL: [Section; 6] = [
+    pub const ALL: [Section; 7] = [
         Section::Memory,
         Section::Providers,
         Section::Skills,
         Section::Personas,
         Section::Agents,
         Section::Knowledge,
+        Section::World,
     ];
 
     pub fn title(&self) -> &'static str {
         match self {
             Section::Memory => "memory",
             Section::Knowledge => "knowledge",
+            Section::World => "world",
             Section::Providers => "providers",
             Section::Skills => "skills",
             Section::Personas => "personas",
@@ -52,6 +56,7 @@ impl Section {
         match self {
             Section::Memory => "what this project has learned — read, write, forget",
             Section::Knowledge => "the project's wiki — hand written, or dreamed from the sessions",
+            Section::World => "the memory as a map: each class a lane, time running left to right",
             Section::Providers => "who can answer, and which model is current",
             Section::Skills => "packaged workflows, picked up by their trigger",
             Section::Personas => "saved system prompts, project or user",
@@ -264,6 +269,7 @@ impl Hub {
     pub fn refresh(&mut self) {
         let mut items = match self.current() {
             Section::Memory => self.memory_items(),
+            Section::World => self.world_items(),
             Section::Knowledge => self.knowledge_items(),
             Section::Providers => self.provider_items(),
             Section::Skills => self.skill_items(),
@@ -291,6 +297,18 @@ impl Hub {
                 label: format!("{}: {}", e.class.id(), e.name),
                 note: e.title,
                 action: Action::ReadMemory(e.class, e.name),
+            })
+            .collect()
+    }
+
+    /// every memory page, as a row the map can point at
+    fn world_items(&self) -> Vec<Item> {
+        world::nodes(&self.root)
+            .into_iter()
+            .map(|n| Item {
+                label: format!("{} {}: {}", world::glyph(n.confidence), n.class.id(), n.name),
+                note: n.day.map(world::iso).unwrap_or_else(|| "undated".into()),
+                action: Action::ReadMemory(n.class, n.name),
             })
             .collect()
     }
@@ -403,10 +421,19 @@ impl Hub {
             self.detail = format!("({} is empty)", self.current().title());
             return;
         };
+        if self.current() == Section::World {
+            self.detail = world::render(&self.root, self.selected().map(|i| &i.action));
+            return;
+        }
         self.detail = match &item.action {
-            Action::ReadMemory(class, name) => Memory::open(&self.root)
-                .read(*class, name)
-                .unwrap_or_else(|e| format!("unreadable: {e}")),
+            Action::ReadMemory(class, name) => {
+                let memory = Memory::open(&self.root);
+                let mut text = memory
+                    .read(*class, name)
+                    .unwrap_or_else(|e| format!("unreadable: {e}"));
+                text.push_str(&page_web(&memory, *class, name));
+                text
+            }
             Action::ReadKnowledge(name) => crate::knowledge::read(&self.root, name)
                 .unwrap_or_else(|e| format!("unreadable: {e}")),
             Action::SetPersona(id) => persona::load(Some(&self.root), id)
@@ -700,6 +727,8 @@ impl Hub {
     pub fn new_purpose(&self) -> Purpose {
         match self.current() {
             Section::Memory => Purpose::NewMemory(Class::Project),
+            // the map is a view of the memory: a new page is written from the memory box
+            Section::World => Purpose::NewMemory(Class::Project),
             Section::Knowledge => Purpose::NewKnowledge,
             Section::Personas => Purpose::NewPersona,
             Section::Skills => Purpose::NewSkill,
@@ -796,7 +825,7 @@ impl Hub {
                     self.activity.push(("error".into(), e));
                     finished = true;
                 }
-                crate::agent::Event::Started { .. } => {}
+                crate::agent::Event::Started { .. } | crate::agent::Event::File { .. } => {}
             }
         }
         if finished {
@@ -847,7 +876,28 @@ fn today() -> String {
     format!("{y}-{:02}-{:02}", m + 1, d + 1)
 }
 
-/// the section list for the left column, with a marker on the current one.
+/// the page's place among the others: what it links to, what links to it,
+/// and how many times it was written, with the day of each version.
+fn page_web(memory: &Memory, class: Class, name: &str) -> String {
+    let mut out = String::new();
+    let links = memory.links(class, name).unwrap_or_default();
+    let back = memory.backlinks(name);
+    if !links.is_empty() {
+        out.push_str(&format!("\n\nlinks to: {}", links.join(", ")));
+    }
+    if !back.is_empty() {
+        out.push_str(&format!("\n\nlinked from: {}", back.join(", ")));
+    }
+    let history = memory.history(class, name);
+    if !history.is_empty() {
+        out.push_str(&format!("\n\nhistory: {} version(s)", history.len()));
+        for (day, _) in history.iter().rev() {
+            out.push_str(&format!("\n  {day}"));
+        }
+    }
+    out
+}
+
 pub fn section_titles(current: Section) -> Vec<String> {
     Section::ALL
         .iter()
@@ -977,6 +1027,26 @@ mod tests {
     }
 
     #[test]
+    fn a_page_shows_its_links_its_backlinks_and_its_history() {
+        let d = seeded();
+        let m = Memory::open(&d);
+        m.write(Class::Project, "stack", "rust only, see [[deploy]]").unwrap();
+        m.write(Class::Project, "deploy", "ships from [[stack]]").unwrap();
+        m.write(Class::Project, "stack", "rust only, no async, see [[deploy]]")
+            .unwrap();
+        let mut hub = Hub::open(&d);
+        while hub.selected().map(|i| i.label.as_str()) != Some("project: stack") {
+            hub.down();
+        }
+        let detail = hub.detail().to_string();
+        assert!(detail.contains("links to: deploy"), "{detail}");
+        assert!(detail.contains("linked from: deploy"), "{detail}");
+        assert!(detail.contains("history:"), "{detail}");
+        assert!(detail.contains("3 version"), "{detail}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn typing_filters_the_list() {
         let d = seeded();
         let mut hub = Hub::open(&d);
@@ -1076,6 +1146,25 @@ mod tests {
             hub.next_section();
         }
         assert_eq!(hub.current(), Section::Memory, "it comes back around");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_world_box_draws_the_memory_as_lanes_in_time() {
+        let d = seeded();
+        let mut hub = Hub::open(&d);
+        while hub.current() != Section::World {
+            hub.next_section();
+        }
+        let lanes: Vec<&str> = hub.detail().lines().map(str::trim).collect();
+        for class in ["user", "feedback", "project", "reference"] {
+            assert!(
+                lanes.iter().any(|l| l.starts_with(class)),
+                "no lane for {class}: {}",
+                hub.detail()
+            );
+        }
+        assert!(hub.detail().contains("today"), "{}", hub.detail());
         let _ = std::fs::remove_dir_all(&d);
     }
 

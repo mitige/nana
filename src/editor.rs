@@ -107,6 +107,11 @@ impl Ed {
     fn sel_row() -> Color {
         Color::Indexed(0)
     }
+    /// Survol de la hub : une bande sarcelle, nettement distincte du noir des
+    /// autres sélections, pour que la ligne visée se voie au premier regard.
+    fn hover() -> Color {
+        Color::Indexed(23)
+    }
     fn text() -> Color {
         Color::Reset
     }
@@ -325,6 +330,8 @@ struct AgentPane {
     status: String,
     /// the persona this conversation runs under, read from the project
     persona: Option<String>,
+    /// file writes announced by the agent, drained by the editor each frame
+    writes: Vec<LiveWrite>,
 }
 
 impl AgentPane {
@@ -340,6 +347,7 @@ impl AgentPane {
             busy: false,
             status: String::new(),
             persona: None,
+            writes: Vec::new(),
         }
     }
 
@@ -393,6 +401,16 @@ impl AgentPane {
                     if ok { "ok".into() } else { "refused".into() },
                     format!("{name}: {}", text.trim()),
                 )),
+                crate::agent::Event::File { path, content, write } => {
+                    if write {
+                        self.writes.push(LiveWrite {
+                            path: PathBuf::from(&path),
+                            text: content.lines().map(str::to_string).collect(),
+                            shown: 0,
+                        });
+                    }
+                    self.lines.push(("file".into(), path));
+                }
                 crate::agent::Event::Finished { steps } => {
                     self.status = format!("done in {steps} step(s)");
                     done = true;
@@ -419,6 +437,15 @@ fn short_json(v: &serde_json::Value) -> String {
     } else {
         s.chars().take(70).collect::<String>() + "…"
     }
+}
+
+/// a write in progress, played back: the text the agent is putting in a file,
+/// and how many of its lines are on screen so far.
+#[derive(Debug, Clone)]
+struct LiveWrite {
+    path: PathBuf,
+    text: Vec<String>,
+    shown: usize,
 }
 
 /// Niveau d'une notification toast.
@@ -485,6 +512,9 @@ pub struct Editor {
     ai: Option<AiClient>,
     /// the agent panel (^a): a conversation with the project's agent
     agent_pane: Option<AgentPane>,
+    /// writes the agent announced, played back one line per step; the first is
+    /// the one on screen
+    live: Vec<LiveWrite>,
     /// the hub (^w): the boxes — memory, providers, skills, personas, agents
     hub: Option<crate::hub::Hub>,
     /// explorateur de fichiers (^T, ou `c-nano <dossier>`)
@@ -644,6 +674,7 @@ impl Editor {
             ext,
             ai: None,
             agent_pane: None,
+            live: Vec::new(),
             hub: None,
             explorer: None,
             search: None,
@@ -1158,9 +1189,37 @@ impl Editor {
     fn poll_agent(&mut self) {
         if let Some(pane) = &mut self.agent_pane {
             pane.poll();
+            self.live.extend(pane.writes.drain(..));
         }
         if let Some(hub) = &mut self.hub {
             hub.poll();
+        }
+    }
+
+    /// one step of a write in progress: the next line of the agent's text
+    /// lands in the buffer, the cursor follows it, and when the text is whole
+    /// the buffer is the saved file, so nothing reads as an unsaved edit.
+    fn play_live(&mut self) {
+        let Some(w) = self.live.first_mut() else {
+            return;
+        };
+        if w.shown == 0 {
+            self.file = Some(w.path.clone());
+            self.lines.clear();
+            self.modified = false;
+        }
+        if w.shown < w.text.len() {
+            self.lines.push(w.text[w.shown].clone());
+            w.shown += 1;
+            self.cy = self.lines.len() - 1;
+            self.cx = self.lines[self.cy].chars().count();
+        }
+        if w.shown >= w.text.len() {
+            if self.lines.is_empty() {
+                self.lines.push(String::new());
+            }
+            self.saved = self.lines.clone();
+            self.live.remove(0);
         }
     }
 
@@ -1296,7 +1355,8 @@ impl Editor {
 
     /// redraw fast while something moves, slowly when the screen is still.
     fn animating(&self) -> bool {
-        self.busy().is_some()
+        !self.live.is_empty()
+            || self.busy().is_some()
             || self.hub.as_ref().map(|h| h.busy.is_some()).unwrap_or(false)
             || !self.toasts.is_empty()
             || self.status_age() < STATUS_TTL
@@ -3227,7 +3287,7 @@ fn draw_hub(frame: &mut Frame, hub: &mut crate::hub::Hub, zone: ratatui::layout:
         let mut spans = vec![
             Span::styled(
                 if selected { "▎" } else { " " },
-                Style::default().fg(Ed::accent()),
+                Style::default().fg(Ed::cyan()),
             ),
             Span::styled(
                 label.clone(),
@@ -3250,7 +3310,7 @@ fn draw_hub(frame: &mut Frame, hub: &mut crate::hub::Hub, zone: ratatui::layout:
                 y,
                 inner.x,
                 inner.right().saturating_sub(1),
-                Ed::sel_row(),
+                Ed::hover(),
             );
         }
     }
@@ -4202,6 +4262,7 @@ fn loop_run(terminal: &mut ratatui::DefaultTerminal, ed: &mut Editor) -> io::Res
     while !ed.should_quit {
         ed.tick_status();
         ed.poll_agent();
+        ed.play_live();
         ed.poll_ai();
         ed.poll_check();
         ed.poll_diag();
@@ -5948,6 +6009,74 @@ mod completion_tests {
             assert_eq!(marked, "{▌");
         }));
         assert!(r.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod hub_hover_tests {
+    use super::*;
+
+    /// the hovered hub row is a band of its own colour: the cursor row must not
+    /// look like the rows around it, or the user cannot tell where the
+    /// selection is.
+    #[test]
+    fn the_hovered_hub_row_has_its_own_colour_band() {
+        let d = std::env::temp_dir().join(format!("nana-hover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".nana")).unwrap();
+        crate::memory::Memory::open(&d)
+            .write(crate::memory::Class::Project, "stack", "# stack\n\nrust")
+            .unwrap();
+        let mut ed = Editor::open(None).unwrap();
+        ed.hub = Some(crate::hub::Hub::open(&d));
+        let backend = ratatui::backend::TestBackend::new(110, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, &mut ed)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let _ = std::fs::remove_dir_all(&d);
+        let row = (0..buf.area.height)
+            .find(|&y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>().contains("project: stack"))
+            .expect("the selected row is drawn");
+        let start = (0..buf.area.width)
+            .find(|&x| buf[(x, row)].symbol() == "p")
+            .unwrap();
+        assert_eq!(buf[(start, row)].bg, Ed::hover(), "the label sits on the hover band");
+        assert_eq!(buf[(start + 10, row)].bg, Ed::hover(), "the band runs under the name");
+        assert_ne!(Ed::hover(), Ed::sel_row(), "the hover is not the invisible black");
+    }
+}
+
+#[cfg(test)]
+mod live_write_tests {
+    use super::*;
+
+    /// the agent's write shows up in the editor behind its card, one line per
+    /// step: the user watches the file grow, it does not appear all at once.
+    #[test]
+    fn a_write_is_played_one_line_at_a_time_in_the_editor() {
+        let d = scratch("live");
+        let target = d.join("new.rs");
+        let mut ed = Editor::open(None).unwrap();
+        ed.file = Some(target.clone());
+        ed.lines = vec![String::new()];
+        let mut pane = AgentPane::new();
+        pane.writes.push(LiveWrite {
+            path: target.clone(),
+            text: vec!["fn one() {}".into(), "fn two() {}".into(), "fn three() {}".into()],
+            shown: 0,
+        });
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        assert_eq!(ed.live.len(), 1, "the write is taken over by the editor");
+        ed.play_live();
+        assert_eq!(ed.lines, vec!["fn one() {}".to_string()], "one line after one step");
+        ed.play_live();
+        assert_eq!(ed.lines.len(), 2, "the next step adds the next line");
+        ed.play_live();
+        ed.play_live();
+        assert_eq!(ed.lines.len(), 3, "the file is complete and then the playback ends");
+        assert!(ed.live.is_empty(), "the playback is over");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
 

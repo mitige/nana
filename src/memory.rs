@@ -147,6 +147,10 @@ fn read_footer(text: &str) -> (Option<String>, Option<Confidence>, Option<String
     (updated, confidence, check)
 }
 
+pub fn today_days() -> i64 {
+    days_now()
+}
+
 fn days_now() -> i64 {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -156,7 +160,12 @@ fn days_now() -> i64 {
 }
 
 fn today_iso() -> String {
-    let (y, m, d) = civil_from_days(days_now());
+    iso_from_days(days_now())
+}
+
+/// the calendar day as yyyy-mm-dd, for the map and the index alike.
+pub fn iso_from_days(days: i64) -> String {
+    let (y, m, d) = civil_from_days(days);
     format!("{y:04}-{m:02}-{d:02}")
 }
 
@@ -184,7 +193,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-fn days_from_iso(s: &str) -> Option<i64> {
+pub fn days_from_iso(s: &str) -> Option<i64> {
     let mut parts = s.trim().split('-');
     let y: i64 = parts.next()?.parse().ok()?;
     let m: i64 = parts.next()?.parse().ok()?;
@@ -272,8 +281,70 @@ impl Memory {
             "{page}\n\n{}\n",
             footer(&today_iso(), confidence, check)
         );
-        std::fs::write(&path, text).map_err(|e| e.to_string())?;
+        std::fs::write(&path, &text).map_err(|e| e.to_string())?;
+        self.append_history(class, title, &today_iso(), &text);
         Ok(path)
+    }
+
+    /// the file that keeps every version of one page, in the project memory.
+    fn history_path(&self, class: Class, name: &str) -> PathBuf {
+        self.root
+            .join(".history")
+            .join(format!("{}--{}.log", class.id(), name.trim().trim_end_matches(".md")))
+    }
+
+    /// each write adds an entry, so the page can be read back as it was.
+    fn append_history(&self, class: Class, name: &str, day: &str, text: &str) {
+        let path = self.history_path(class, name);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let entry = format!("<!-- nana entry: {day} -->\n{text}\n");
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = f.write_all(entry.as_bytes());
+        }
+    }
+
+    /// every version written of one page, oldest first, each with its day.
+    pub fn history(&self, class: Class, name: &str) -> Vec<(String, String)> {
+        let text = std::fs::read_to_string(self.history_path(class, name)).unwrap_or_default();
+        let mut out: Vec<(String, String)> = Vec::new();
+        for line in text.lines() {
+            if let Some(day) = line
+                .strip_prefix("<!-- nana entry: ")
+                .and_then(|s| s.strip_suffix(" -->"))
+            {
+                out.push((day.to_string(), String::new()));
+            } else if let Some(last) = out.last_mut() {
+                last.1.push_str(line);
+                last.1.push('\n');
+            }
+        }
+        for (_, body) in &mut out {
+            *body = body.trim_end().to_string();
+        }
+        out
+    }
+
+    /// the `[[name]]` links a page makes, in order, without repeats.
+    pub fn links(&self, class: Class, name: &str) -> Option<Vec<String>> {
+        let text = self.read(class, name).ok()?;
+        Some(parse_links(&text))
+    }
+
+    /// the pages that link to `name`, in any class.
+    pub fn backlinks(&self, name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for e in self.list() {
+            let Ok(text) = std::fs::read_to_string(&e.path) else {
+                continue;
+            };
+            if e.name != name && parse_links(&text).iter().any(|l| l == name) {
+                out.push(e.name.clone());
+            }
+        }
+        out
     }
 
     pub fn read(&self, class: Class, name: &str) -> Result<String, String> {
@@ -374,6 +445,24 @@ impl Memory {
         }
         out
     }
+}
+
+/// the names inside `[[ ]]`: trimmed, empty ones dropped, each name once.
+pub fn parse_links(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find("[[") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("]]") else {
+            break;
+        };
+        let name = after[..close].trim();
+        if !name.is_empty() && !name.contains('\n') && !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+        rest = &after[close + 2..];
+    }
+    out
 }
 
 #[cfg(test)]
@@ -548,5 +637,32 @@ mod tests {
         assert_eq!(civil_from_days(leap), (2024, 2, 29));
         assert_eq!(days_from_iso("2024-13-01"), None);
         assert_eq!(days_from_iso("not a date"), None);
+    }
+
+    #[test]
+    fn a_page_links_to_others_with_double_brackets() {
+        let d = tmp("links");
+        let m = Memory::open(&d);
+        m.write(Class::Project, "stack", "see [[deploy]] and [[ tone ]], not [[]]")
+            .unwrap();
+        m.write(Class::Project, "deploy", "uses [[stack]]").unwrap();
+        assert_eq!(m.links(Class::Project, "stack").unwrap(), vec!["deploy", "tone"]);
+        assert_eq!(m.backlinks("deploy"), vec!["stack"]);
+        assert!(m.backlinks("nobody").is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn every_write_is_kept_in_the_history_with_its_day() {
+        let d = tmp("hist");
+        let m = Memory::open(&d);
+        m.write(Class::User, "tone", "blunt").unwrap();
+        m.write(Class::User, "tone", "blunt and short").unwrap();
+        m.write(Class::User, "other", "x").unwrap();
+        let h = m.history(Class::User, "tone");
+        assert_eq!(h.len(), 2, "{h:?}");
+        assert_eq!(h[0].0, today_iso(), "each entry is dated");
+        assert!(m.history(Class::User, "other").len() == 1);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
