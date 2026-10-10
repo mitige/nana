@@ -136,6 +136,14 @@ pub fn specs() -> Vec<ToolSpec> {
             ),
         },
         ToolSpec {
+            name: "memory_tidy".into(),
+            description: "remove, without asking, the memory pages past their staleness limit \
+                          (never a user page) and the pages that copy another. every removed \
+                          page stays readable in the history."
+                .into(),
+            parameters: obj(json!({}), json!([])),
+        },
+        ToolSpec {
             name: "memory_audit".into(),
             description: "look over the memory of this project for pages that repeat each other \
                           and pages past their staleness limit. it only reports: nothing is \
@@ -419,6 +427,16 @@ pub fn run(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> {
             } else {
                 Ok(format!("does not hold: {name}\n{out}"))
             }
+        }
+        "memory_tidy" => {
+            let tidy = ctx.memory.tidy();
+            if tidy.removed.is_empty() {
+                return Ok("memory tidy: nothing stale and no copy".into());
+            }
+            let mut lines =
+                vec!["memory tidy, removed without asking (kept in the history):".to_string()];
+            lines.extend(tidy.removed.iter().map(|r| format!("removed: {r}")));
+            Ok(lines.join("\n"))
         }
         "memory_audit" => {
             let audit = ctx.memory.audit();
@@ -750,6 +768,7 @@ mod tests {
                 "run_shell" => json!({"command": "true"}),
                 "memory_list" => json!({}),
                 "memory_audit" => json!({}),
+                "memory_tidy" => json!({}),
                 "memory_check" => json!({"class": "user", "name": "absent"}),
                 "memory_read" => json!({"class": "user", "name": "absent"}),
                 "memory_write" => json!({"class": "user", "name": "n", "content": "c"}),

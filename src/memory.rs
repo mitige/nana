@@ -6,6 +6,7 @@
 //! that repository's memory and nothing else, so a long-lived store never
 //! becomes a pile of unrelated notes.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -476,6 +477,36 @@ impl Memory {
         out
     }
 
+    /// removes the stale pages and the near-copies of another page, without asking.
+    /// a user page is never dropped for its age: the user's own words are not
+    /// the agent's to expire. every removed page is first written to the
+    /// history, so it can still be read back.
+    pub fn tidy(&self) -> Tidy {
+        let mut entries = self.list();
+        entries.sort_by(|a, b| (a.class.id(), &a.name).cmp(&(b.class.id(), &b.name)));
+        let day = today_iso();
+        let mut seen: Vec<(String, BTreeSet<String>)> = Vec::new();
+        let mut removed = Vec::new();
+        for e in &entries {
+            let Ok(text) = std::fs::read_to_string(&e.path) else {
+                continue;
+            };
+            let key = format!("{}/{}", e.class.id(), e.name);
+            let words: BTreeSet<String> = words_of(&text).into_iter().collect();
+            let stale = e.class != Class::User && e.stale();
+            let copy = seen.iter().any(|(_, w)| same_enough(w, &words));
+            if stale || copy {
+                self.append_history(e.class, &e.name, &day, &text);
+                if std::fs::remove_file(&e.path).is_ok() {
+                    removed.push(key);
+                }
+            } else {
+                seen.push((key, words));
+            }
+        }
+        Tidy { removed }
+    }
+
     /// reads every page and reports what needs a human decision. read only.
     pub fn audit(&self) -> Audit {
         let entries = self.list();
@@ -527,6 +558,12 @@ impl Memory {
     }
 }
 
+/// what `tidy` removed, as `class/name`. the copies stay readable in the history.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Tidy {
+    pub removed: Vec<String>,
+}
+
 /// what the audit found: pages that say the same words, and pages past the
 /// staleness limit. it only reports; deleting or merging a page is a change the
 /// user approves, never a side effect of looking.
@@ -536,6 +573,19 @@ pub struct Audit {
     pub duplicates: Vec<(String, String)>,
     /// `class/name` of every page past the staleness limit
     pub stale: Vec<String>,
+}
+
+/// two pages are the same thing when their words overlap this much (jaccard).
+/// below it they are about different things; exact equality is a special case.
+const NEAR_COPY: f64 = 0.8;
+
+fn same_enough(a: &BTreeSet<String>, b: &BTreeSet<String>) -> bool {
+    if a.is_empty() && b.is_empty() {
+        return true;
+    }
+    let common = a.intersection(b).count() as f64;
+    let all = a.union(b).count() as f64;
+    common / all >= NEAR_COPY
 }
 
 /// the words of a body, lowercased, so a copy that differs only in case or
@@ -731,6 +781,98 @@ mod tests {
         assert_eq!(e.updated, None);
         assert_eq!(e.confidence, None);
         assert!(!e.stale(), "no date means no claim of staleness");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn tidy_removes_stale_pages_and_copies_but_keeps_user_pages() {
+        let d = tmp("tidy");
+        let m = Memory::open(&d);
+        let project = d.join(".nana/memory/project");
+        let user = d.join(".nana/memory/user");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        let today = today_iso();
+        std::fs::write(
+            project.join("old.md"),
+            "# old\n\nold fact\n\n<!-- nana: updated 2001-01-01, confidence high -->\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join("old-tone.md"),
+            "# old tone\n\nblunt\n\n<!-- nana: updated 2001-01-01, confidence high -->\n",
+        )
+        .unwrap();
+        let body = "# a\n\nthe same words in the same order\n";
+        std::fs::write(
+            project.join("a.md"),
+            format!("{body}\n<!-- nana: updated {today}, confidence high -->\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("b.md"),
+            format!("{body}\n<!-- nana: updated {today}, confidence high -->\n"),
+        )
+        .unwrap();
+
+        let report = m.tidy();
+
+        assert!(
+            !project.join("old.md").exists(),
+            "a stale project page goes"
+        );
+        assert!(
+            user.join("old-tone.md").exists(),
+            "a user page is never dropped for age"
+        );
+        let copies = [project.join("a.md").exists(), project.join("b.md").exists()];
+        assert_eq!(
+            copies.iter().filter(|x| **x).count(),
+            1,
+            "one of two copies stays"
+        );
+        assert_eq!(
+            report.removed.len(),
+            2,
+            "the stale page and the copy: {report:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn tidy_merges_pages_that_say_nearly_the_same_thing() {
+        let d = tmp("tidy-near");
+        let m = Memory::open(&d);
+        let project = d.join(".nana/memory/project");
+        std::fs::create_dir_all(&project).unwrap();
+        let today = today_iso();
+        let footer = format!("\n<!-- nana: updated {today}, confidence high -->\n");
+        let shared = "the build uses cargo and the tests run in ci on every push to main";
+        std::fs::write(
+            project.join("build.md"),
+            format!("# build\n\n{shared} with the release notes\n{footer}"),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("build-ci.md"),
+            format!("# build ci\n\n{shared} plus the release notes\n{footer}"),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("colours.md"),
+            format!("# colours\n\nthe hub card is teal and the search is amber\n{footer}"),
+        )
+        .unwrap();
+
+        let report = m.tidy();
+
+        let left = m.list().len();
+        assert_eq!(left, 2, "two near-copies become one page: {report:?}");
+        assert!(
+            project.join("colours.md").exists(),
+            "a page about another thing stays"
+        );
+        assert_eq!(report.removed.len(), 1, "{report:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
