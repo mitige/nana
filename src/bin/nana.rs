@@ -42,6 +42,7 @@ fn main() {
             print_skills(&root);
             0
         }
+        Some("--company") => company_cmd(&root, &args[1..]),
         Some("--memory") => memory_cmd(&root, &args[1..]),
         Some("--persona") => persona_cmd(&root, &args[1..]),
         Some("--show-prompt") => show_prompt(&root, &args[1..]),
@@ -72,6 +73,7 @@ usage: nana [file|dir]          open the editor
        nana --agent \"…\"        ask the agent to do something here
        nana --providers         list the model providers
        nana --memory …          the project's memory
+       nana --company …         the company: hire, task, fire, mail
        nana --persona …         saved system prompts
        nana --skills            skills this project offers
        nana --show-prompt \"…\"   print the assembled system prompt
@@ -168,6 +170,125 @@ fn print_skills(root: &Path) {
                 &s.trigger
             }
         );
+    }
+}
+
+/// the company: a ceo that hires, employees that work.
+fn company_cmd(root: &Path, rest: &[String]) -> i32 {
+    use nana::company;
+    match rest.first().map(String::as_str) {
+        None | Some("list") => {
+            print!("{}", company::describe(root));
+            let mail = company::mailbox(root);
+            if !mail.is_empty() {
+                println!("\nmailbox:");
+                for t in mail.iter().rev().take(8) {
+                    println!("  {:<8} {:<10} {}", t.employee, t.state, short(&t.task, 60));
+                }
+            }
+            0
+        }
+        Some("hire") => {
+            let mission = rest[1..].join(" ");
+            if mission.trim().is_empty() {
+                eprintln!("usage: nana --company hire \"the mission\"");
+                return 2;
+            }
+            let settings = settings::Settings::load(root);
+            let mut runner = match agent::Agent::new(root, settings) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("nana: {e}");
+                    return 1;
+                }
+            };
+            let project = settings::Settings::load(root);
+            let known = skills::discover(root, &project.skill_dirs)
+                .into_iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>();
+            eprintln!("the ceo is thinking about: {mission}");
+            match company::plan_hiring(&mut runner, &mission, &known) {
+                Ok(people) => match company::hire(root, &people) {
+                    Ok(n) => {
+                        println!("hired {n}:");
+                        for p in &people {
+                            println!("  {:<12} {:<22} {}", p.name, p.role, p.mission);
+                        }
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("nana: {e}");
+                        1
+                    }
+                },
+                Err(e) => {
+                    eprintln!("nana: {e}");
+                    1
+                }
+            }
+        }
+        Some("task") => {
+            let (Some(name), true) = (rest.get(1), rest.len() > 2) else {
+                eprintln!("usage: nana --company task <name> \"the task\"");
+                return 2;
+            };
+            let task = rest[2..].join(" ");
+            let Some(employee) = company::employee(root, name) else {
+                eprintln!("nana: nobody named « {name} » works here");
+                return 1;
+            };
+            let settings = settings::Settings::load(root);
+            eprintln!("{} is on it", employee.name);
+            let result = company::dispatch(root, settings, &employee, &task, |e| match e {
+                agent::Event::ToolCall { name, args } => {
+                    eprintln!("→ {name} {}", short(&args.to_string(), 100))
+                }
+                agent::Event::ToolResult { name, ok, text } => {
+                    eprintln!(
+                        "{} {name} {}",
+                        if ok { "ok" } else { "no" },
+                        short(text.trim(), 120)
+                    )
+                }
+                agent::Event::Text(t) => println!("{t}"),
+                agent::Event::Error(e) => eprintln!("nana: {e}"),
+                _ => {}
+            });
+            match result {
+                Ok(_) => 0,
+                Err(_) => 1,
+            }
+        }
+        Some("fire") => {
+            let Some(name) = rest.get(1) else {
+                eprintln!("usage: nana --company fire <name>");
+                return 2;
+            };
+            match company::fire(root, name) {
+                Ok(()) => {
+                    println!("{name} was let go");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("nana: {e}");
+                    1
+                }
+            }
+        }
+        Some("mail") => {
+            for t in company::mailbox(root) {
+                println!("{:<8} {:<8} {}", t.employee, t.state, short(&t.task, 70));
+                if !t.result.is_empty() {
+                    println!("         {}", short(&t.result, 90));
+                }
+            }
+            0
+        }
+        Some(other) => {
+            eprintln!("nana: unknown company command {other}");
+            2
+        }
     }
 }
 

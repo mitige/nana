@@ -226,6 +226,73 @@ rust, no async, every feature gets a test
 EOF
 ```
 
+### the hub: the boxes
+
+`ctrl+w` opens the hub: the project's boxes side by side, a navigation card on
+the left and the detail of what you selected on the right. everything that
+would otherwise send you to a shell happens here.
+
+| box | what you can do in it |
+| --- | --- |
+| memory | read a page, write a new one, edit it, forget it |
+| providers | see who can answer, pick the model with a keystroke |
+| skills | read one, run it (it hands itself to the agent), write a new one |
+| personas | read it, use it by default, edit it, delete it |
+| agents | the company: hire, give work, fire, follow the mailbox |
+
+keys inside the hub:
+
+| key | what it does |
+| --- | --- |
+| `↑` `↓` | move in the list |
+| `←` `→` | change box |
+| `enter` | act on the selection, or answer what the box is asking |
+| `ctrl+n` | new: a memory page, a persona, a skill, or a mission for the ceo |
+| `ctrl+e` | edit the file behind the selection, right here in nana |
+| `ctrl+d` | delete it: forget a page, delete a persona, fire an employee |
+| `ctrl+t` | give the selected employee a task |
+| typing | filters the list |
+| `esc` | close the hub |
+
+the box asks for what it needs in its own line, keeps working while the ceo
+thinks, and shows what happened in the right card. nothing here needs a
+terminal command.
+
+### the company
+
+the `agents` box is a small company inside your project. you give the **ceo**
+a mission; it hires the smallest team that can do the work, each employee with
+a role and a system prompt of its own. then you give an employee a task, and
+that task is an ordinary agent run under that employee's persona — with the
+tools, the project's `AGENTS.md`, its skills and its memory.
+
+```
+you:    add a --version flag to the cli
+ceo:    hired rio (cli engineer) — owns the flag end to end
+you:    (rio) read src/bin/nana.rs and say where the version is printed
+rio:    → read_file {"path": "src/bin/nana.rs"}
+        the version is printed in main, in the --version arm
+        per AGENTS.md i will write the failing test first…
+        → write_file tests/version.rs
+        → run_shell cargo test
+        test result: ok. 1 passed
+```
+
+the roster is `.nana/agents/roster.json` and the mailbox is
+`.nana/agents/tasks.jsonl` — both plain json you can read and edit. the org
+chart is a file, so it survives the session and you can version it (or delete
+it).
+
+from the shell, the same thing:
+
+```sh
+nana --company hire "add a --version flag to the cli"
+nana --company list
+nana --company task rio "write the test for it"
+nana --company mail
+nana --company fire rio
+```
+
 ### providers
 
 one client, three wire shapes (openai-compatible, anthropic, gemini) covering
@@ -326,6 +393,7 @@ nana --providers        the provider table
 nana --memory …         the project's memory
 nana --persona …        saved system prompts
 nana --skills           what this project can hand the agent
+nana --company …        the company: hire, task, fire, mail
 ```
 
 ### how the prompt is built
@@ -369,7 +437,7 @@ final_newline = true
 ## development
 
 ```sh
-cargo test        # 161 tests, no network, no fixtures to download
+cargo test        # 193 tests, no network, no fixtures to download
 cargo run         # the editor, on this repository
 cargo run -- --languages
 ```
