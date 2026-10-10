@@ -567,7 +567,8 @@ impl Memory {
             };
             let key = format!("{}/{}", e.class.id(), e.name);
             let words: BTreeSet<String> = words_of(&text).into_iter().collect();
-            let stale = e.class != Class::User && e.stale();
+            // age alone is not enough: a page written long ago but read lately is still in use
+            let stale = e.class != Class::User && e.stale() && e.forgotten();
             let copy = seen.iter().any(|(_, w)| same_enough(w, &words));
             if stale || copy {
                 self.append_history(e.class, &e.name, &day, &text);
@@ -660,7 +661,9 @@ impl ConsolidationTrigger {
     }
 }
 
-/// a hash of the page names and bodies: any change to the memory changes it.
+/// a hash of the page names and bodies: any change to what the memory says
+/// changes it. the footer is left out, because a read only moves its counter,
+/// and a counter must not make the same memory look new.
 fn fingerprint(m: &Memory) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -668,8 +671,10 @@ fn fingerprint(m: &Memory) -> u64 {
     for e in m.list() {
         e.class.id().hash(&mut h);
         e.name.hash(&mut h);
-        std::fs::read_to_string(&e.path)
-            .unwrap_or_default()
+        let text = std::fs::read_to_string(&e.path).unwrap_or_default();
+        text.lines()
+            .filter(|l| !is_footer(l))
+            .collect::<Vec<_>>()
             .hash(&mut h);
     }
     h.finish()
@@ -1412,6 +1417,45 @@ mod tests {
         m.write(Class::Project, "a", "# a\n\nalpha beta").unwrap();
         m.write(Class::Project, "b", "# b\n\ngamma delta").unwrap();
         assert!(!ConsolidationTrigger::default().due(&m));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn tidy_keeps_a_page_that_is_still_used_even_if_written_long_ago() {
+        let d = tmp("tidy-used");
+        let m = Memory::open(&d);
+        let dir = d.join(".nana/memory/project");
+        std::fs::create_dir_all(&dir).unwrap();
+        let written = days_ago(120);
+        let used = days_ago(1);
+        std::fs::write(
+            dir.join("live.md"),
+            format!("# live\n\nfact\n\n<!-- nana: updated {written}, confidence high, uses 5, used {used} -->\n"),
+        )
+        .unwrap();
+        let report = m.tidy();
+        assert!(
+            dir.join("live.md").exists(),
+            "a page read yesterday is not removed for its write date: {report:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_use_alone_does_not_rearm_consolidation() {
+        let d = tmp("due-use");
+        let m = Memory::open(&d);
+        m.write(Class::Project, "a", "# a\n\nthe same words here")
+            .unwrap();
+        m.write(Class::Project, "b", "# b\n\nthe same words here")
+            .unwrap();
+        let mut trig = ConsolidationTrigger::default();
+        trig.done(&m);
+        m.reinforce(Class::Project, "a").unwrap();
+        assert!(
+            !trig.due(&m),
+            "reading a page changes its counter, not what it says: no second model call"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
