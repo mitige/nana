@@ -8,6 +8,16 @@ version 2.0.
 
 ![nana opens on the hub: nothing of the ide is drawn behind it](docs/shots/hub-start.png)
 
+## 2.0 on screen
+
+captured from the real binary, in a 120×34 terminal. the hub is the only thing
+drawn at start; `esc` gives back the editor, and `f3` or `super+t` opens the
+terminal.
+
+| the hub | the editor | the terminal |
+| --- | --- | --- |
+| ![the hub](docs/screens/hub.png) | ![the editor](docs/screens/editor.png) | ![the terminal](docs/screens/terminal.png) |
+
 ## what it is
 
 nana is a small, fast, keyboard-driven editor for the terminal — and it knows
@@ -171,9 +181,9 @@ what it learns — per project, on disk, in markdown you can read and edit.
 
 ### the panel
 
-`ctrl+a` opens the agent. the card takes the keyboard: type your request,
-`enter` sends it, `esc` closes the card — and `esc` again while it is thinking
-cancels the request.
+`ctrl+a` opens the agent. the menu takes the whole screen, like the hub: nothing
+of the ide is drawn behind it. type your request, `enter` sends it, `esc`
+closes the menu — and `esc` again while it is thinking cancels the request.
 
 ![the agent](docs/shots/test3.png)
 
@@ -461,7 +471,7 @@ final_newline = true
 ## development
 
 ```sh
-cargo test        # 207 tests, no network, no fixtures to download
+cargo test        # 212 tests, no network, no fixtures to download
 cargo run         # the editor, on this repository
 cargo run -- --languages
 ```
