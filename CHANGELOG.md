@@ -1,5 +1,9 @@
 # changelog
 
+## 2.2.4
+
+- the release job checks out the repository before it publishes, so the changelog is found.
+
 ## 2.2.3
 
 - the windows test suite builds the expected absolute paths with the platform rules.
