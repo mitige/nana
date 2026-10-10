@@ -323,6 +323,8 @@ struct AgentPane {
     rx: Option<Receiver<crate::agent::Event>>,
     busy: bool,
     status: String,
+    /// the persona this conversation runs under, read from the project
+    persona: Option<String>,
 }
 
 impl AgentPane {
@@ -337,6 +339,7 @@ impl AgentPane {
             rx: None,
             busy: false,
             status: String::new(),
+            persona: None,
         }
     }
 
@@ -482,6 +485,8 @@ pub struct Editor {
     ai: Option<AiClient>,
     /// the agent panel (^a): a conversation with the project's agent
     agent_pane: Option<AgentPane>,
+    /// the hub (^w): the boxes — memory, providers, skills, personas, agents
+    hub: Option<crate::hub::Hub>,
     /// explorateur de fichiers (^T, ou `c-nano <dossier>`)
     explorer: Option<Explorer>,
     /// recherche de fichiers flottante (^O, façon Telescope)
@@ -633,6 +638,7 @@ impl Editor {
             ext,
             ai: None,
             agent_pane: None,
+            hub: None,
             explorer: None,
             search: None,
             focus: Focus::Editor,
@@ -749,6 +755,45 @@ impl Editor {
         self.cx = indent_len;
         self.sync_modified();
         self.clear_ghost();
+    }
+
+    /// split the line here, with no auto-indent: pasting must not reformat.
+    fn split_line_here(&mut self) {
+        let rest = self.lines[self.cy].split_off(self.cx);
+        self.cy += 1;
+        self.lines.insert(self.cy, rest);
+        self.cx = 0;
+    }
+
+    /// Paste a block of text verbatim. Typing enter auto-indents, which is
+    /// right for writing code and wrong for pasting it: what you copied is
+    /// what you get, newlines included, and nothing grows a tab of its own.
+    fn paste(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        // a modal card owns the keyboard: a paste goes nowhere while it is open
+        if self.agent_pane.is_some() || self.hub.is_some() {
+            return;
+        }
+        self.snapshot();
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut lines = 0;
+        for (i, part) in normalized.split('\n').enumerate() {
+            if i > 0 {
+                self.split_line_here();
+                lines += 1;
+            }
+            if part.is_empty() {
+                continue;
+            }
+            let line = &mut self.lines[self.cy];
+            line.insert_str(self.cx, part);
+            self.cx += part.len();
+        }
+        self.sync_modified();
+        self.clear_ghost();
+        self.status = format!("pasted {lines} line(s)");
     }
 
     fn backspace(&mut self) {
@@ -1108,6 +1153,9 @@ impl Editor {
         if let Some(pane) = &mut self.agent_pane {
             pane.poll();
         }
+        if let Some(hub) = &mut self.hub {
+            hub.poll();
+        }
     }
 
     fn poll_check(&mut self) {
@@ -1243,6 +1291,7 @@ impl Editor {
     /// redraw fast while something moves, slowly when the screen is still.
     fn animating(&self) -> bool {
         self.busy().is_some()
+            || self.hub.as_ref().map(|h| h.busy.is_some()).unwrap_or(false)
             || !self.toasts.is_empty()
             || self.status_age() < STATUS_TTL
             || self
@@ -1653,6 +1702,199 @@ impl Editor {
         self.focus = order[(pos + 1) % order.len()];
     }
 
+    // -------------------------------------------------------------------- hub
+
+    /// the hub is modal too: it browses the boxes, and enter acts on the
+    /// selected item.
+    fn hub_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.hub.is_none() {
+            return;
+        }
+        // each branch takes the borrow and gives it straight back: acting on an
+        // item touches the rest of the editor, and a held borrow would forbid it
+        match key.code {
+            KeyCode::Esc => self.hub = None,
+            KeyCode::Up => {
+                if let Some(h) = self.hub.as_mut() {
+                    h.up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(h) = self.hub.as_mut() {
+                    h.down();
+                }
+            }
+            KeyCode::Left => {
+                if let Some(h) = self.hub.as_mut() {
+                    h.prev_section();
+                }
+            }
+            KeyCode::Right | KeyCode::Tab => {
+                if let Some(h) = self.hub.as_mut() {
+                    h.next_section();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(h) = self.hub.as_mut() {
+                    h.backspace();
+                }
+            }
+            KeyCode::Char(c) if !ctrl => {
+                if let Some(h) = self.hub.as_mut() {
+                    h.type_char(c);
+                }
+            }
+            KeyCode::Enter => self.hub_act(),
+            // the box does the work: no shell needed to write a persona, cut a
+            // skill or hire a team
+            KeyCode::Char('n') if ctrl => {
+                if let Some(h) = self.hub.as_mut() {
+                    let p = h.new_purpose();
+                    h.begin(p);
+                }
+            }
+            KeyCode::Char('e') if ctrl => self.hub_edit(),
+            KeyCode::Char('d') if ctrl => self.hub_delete(),
+            KeyCode::Char('t') if ctrl => self.hub_task(),
+            _ => {}
+        }
+    }
+
+    /// ctrl+e: open the file behind the selection, to edit it here.
+    fn hub_edit(&mut self) {
+        let Some(hub) = self.hub.as_mut() else {
+            return;
+        };
+        match hub.edit_selected() {
+            Ok(crate::hub::Outcome::OpenFile(path)) => {
+                self.hub = None;
+                self.open_path(path);
+            }
+            Ok(crate::hub::Outcome::Say(m)) => self.status = m,
+            Ok(crate::hub::Outcome::None) => {}
+            Err(e) => {
+                if let Some(h) = self.hub.as_mut() {
+                    h.activity.push(("error".into(), e));
+                }
+            }
+        }
+    }
+
+    /// ctrl+d: forget a page, delete a persona or a skill, fire an employee.
+    fn hub_delete(&mut self) {
+        let Some(hub) = self.hub.as_mut() else {
+            return;
+        };
+        match hub.delete_selected() {
+            Ok(m) if !m.is_empty() => hub.activity.push(("text".into(), m)),
+            Ok(_) => {}
+            Err(e) => hub.activity.push(("error".into(), e)),
+        }
+    }
+
+    /// ctrl+t: give the selected employee a task, typed right here.
+    fn hub_task(&mut self) {
+        let Some(hub) = self.hub.as_mut() else {
+            return;
+        };
+        let name = hub
+            .selected()
+            .map(|i| i.label.trim().trim_start_matches('●').trim().to_string())
+            .unwrap_or_default();
+        if name.is_empty() || name == "ceo" {
+            hub.activity
+                .push(("error".into(), "pick an employee first".into()));
+            return;
+        }
+        hub.begin(crate::hub::Purpose::Task(name));
+    }
+
+    /// load a file into the buffer, wherever it comes from.
+    fn open_path(&mut self, path: std::path::PathBuf) {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                self.snapshot();
+                self.lines = text.lines().map(str::to_string).collect();
+                if self.lines.is_empty() {
+                    self.lines.push(String::new());
+                }
+                self.ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("txt")
+                    .to_string();
+                self.file = Some(path);
+                self.saved = self.lines.clone();
+                self.modified = false;
+                self.cx = 0;
+                self.cy = 0;
+                self.status = "written in nana — ctrl+s saves it".into();
+            }
+            Err(e) => self.notify(Level::Err, format!("cannot open: {e}")),
+        }
+    }
+
+    /// do what the selected item says.
+    fn hub_act(&mut self) {
+        // if the box is asking for something, enter answers it
+        if self.hub.as_ref().map(|h| h.typing()).unwrap_or(false) {
+            let outcome = self.hub.as_mut().map(|h| h.submit());
+            match outcome {
+                Some(Ok(crate::hub::Outcome::OpenFile(path))) => {
+                    self.hub = None;
+                    self.open_path(path);
+                }
+                Some(Ok(crate::hub::Outcome::Say(m))) => self.status = m,
+                Some(Ok(crate::hub::Outcome::None)) => {}
+                Some(Err(e)) => {
+                    if let Some(h) = self.hub.as_mut() {
+                        h.activity.push(("error".into(), e));
+                    }
+                }
+                None => {}
+            }
+            return;
+        }
+        let Some((root, action)) = self
+            .hub
+            .as_ref()
+            .and_then(|h| h.selected().map(|i| (h.root.clone(), i.action.clone())))
+        else {
+            return;
+        };
+        match action {
+            crate::hub::Action::ReadMemory(class, name) => {
+                let path = crate::memory::Memory::open(&root)
+                    .root()
+                    .join(class.id())
+                    .join(format!("{name}.md"));
+                self.hub = None;
+                self.open_path(path);
+                self.status = format!("{name} — from this project's memory");
+            }
+            crate::hub::Action::RunSkill(name) => {
+                self.hub = None;
+                let mut pane = AgentPane::new();
+                pane.persona = crate::settings::Settings::load(&root).persona;
+                pane.input = format!("follow the {name} skill");
+                self.agent_pane = Some(pane);
+                self.status = format!("skill {name} — enter sends it to the agent");
+            }
+            other => match crate::hub::apply(&root, &other) {
+                Ok(m) => {
+                    if !m.is_empty() {
+                        self.notify(Level::Ok, m);
+                    }
+                    if let Some(h) = self.hub.as_mut() {
+                        h.refresh();
+                    }
+                }
+                Err(e) => self.notify(Level::Err, e),
+            },
+        }
+    }
+
     // ------------------------------------------------------------------ agent
 
     fn agent_key(&mut self, key: KeyEvent) {
@@ -1898,9 +2140,32 @@ impl Editor {
         if self.agent_pane.is_some() {
             return self.agent_key(key);
         }
+        if self.hub.is_some() {
+            return self.hub_key(key);
+        }
         if ctrl && key.code == KeyCode::Char('a') {
-            self.agent_pane = Some(AgentPane::new());
+            let root = crate::project::detect(self.file.as_deref().unwrap_or(Path::new(".")))
+                .map(|p| p.root)
+                .unwrap_or_else(|| file_dir(self.file.as_deref()));
+            let mut pane = AgentPane::new();
+            pane.persona = crate::settings::Settings::load(&root).persona;
+            self.agent_pane = Some(pane);
             self.status = "agent — type a request, enter sends, esc closes".into();
+            return;
+        }
+        if ctrl && key.code == KeyCode::Char('w') {
+            // the boxes are about the project you have open. the repository
+            // root wins: memory, personas and the company live at the top of
+            // the project, not in whatever folder the open file sits in.
+            let root = self
+                .file
+                .as_deref()
+                .and_then(crate::project::detect)
+                .map(|p| p.root)
+                .or_else(|| self.explorer.as_ref().map(|e| e.root.clone()))
+                .unwrap_or_else(|| file_dir(self.file.as_deref()));
+            self.hub = Some(crate::hub::Hub::open(&root));
+            self.status = "hub — ↑↓ browse, ←→ boxes, enter acts, esc closes".into();
             return;
         }
 
@@ -2526,18 +2791,24 @@ fn draw(frame: &mut Frame, ed: &mut Editor) {
     // fond unifié sur toute la surface — la signature « Minuit »
     fill(frame, area, Style::default().bg(Ed::bg()));
 
+    // one blank line under the top bar and one above the status bar: a card
+    // whose top border touches the bar is a rectangle, not a card. the air
+    // around it is what makes the rounded corners read as rounded.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // barre haute
+            Constraint::Length(1), // souffle
             Constraint::Min(3),    // corps
+            Constraint::Length(1), // souffle
             Constraint::Length(1), // barre basse
         ])
         .split(area);
     fill(frame, chunks[0], Style::default().bg(Ed::bar_bg()));
-    fill(frame, chunks[2], Style::default().bg(Ed::bar_bg()));
+    fill(frame, chunks[4], Style::default().bg(Ed::bar_bg()));
 
     draw_topbar(frame, ed, chunks[0]);
+    let body_zone = chunks[2];
 
     // ── corps : boîtes arrondies façon lazy.nvim — explorateur à gauche,
     // éditeur à droite, le focus teinte la bordure ──
@@ -2549,7 +2820,7 @@ fn draw(frame: &mut Frame, ed: &mut Editor) {
                 Constraint::Length(1), // souffle entre les boîtes
                 Constraint::Min(10),
             ])
-            .split(chunks[1]);
+            .split(body_zone);
         // boîte nue : la bordure colorée + le badge suffisent au focus
         let inner = draw_box(frame, sp[0], &[], border_for(ed.focus == Focus::Explorer));
         if let Some(ex) = &mut ed.explorer {
@@ -2557,17 +2828,23 @@ fn draw(frame: &mut Frame, ed: &mut Editor) {
         }
         sp[2]
     } else {
-        chunks[1]
+        body_zone
     };
     // boîte nue — le fichier vit dans le breadcrumb et la statusline
     let title: Vec<(String, Color)> = Vec::new();
     // le terminal prend le bas de la colonne éditeur quand il est ouvert
     let (editor_area, term_area) = if ed.term.is_some() {
+        // a blank line between the editor and the terminal, so the two cards
+        // do not share a border line and read as one rectangle
         let sp = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(5), Constraint::Length(TERM_H)])
+            .constraints([
+                Constraint::Min(5),
+                Constraint::Length(1), // souffle
+                Constraint::Length(TERM_H),
+            ])
             .split(edit_zone);
-        (sp[0], Some(sp[1]))
+        (sp[0], Some(sp[2]))
     } else {
         (edit_zone, None)
     };
@@ -2590,14 +2867,17 @@ fn draw(frame: &mut Frame, ed: &mut Editor) {
     }
     // floats par-dessus tout : recherche, puis toasts
     if let Some(fs) = &mut ed.search {
-        draw_search(frame, fs, chunks[1], ed.focus == Focus::Search);
+        draw_search(frame, fs, chunks[2], ed.focus == Focus::Search);
     }
     if let Some(pane) = &mut ed.agent_pane {
-        draw_agent(frame, pane, chunks[1]);
+        draw_agent(frame, pane, chunks[2]);
+    }
+    if let Some(hub) = &mut ed.hub {
+        draw_hub(frame, hub, chunks[2]);
     }
     draw_toasts(frame, ed, area);
 
-    draw_statusbar(frame, ed, chunks[2]);
+    draw_statusbar(frame, ed, chunks[4]);
 }
 
 /// Barre haute : bloc brand corail + branche git + breadcrumb du fichier —
@@ -2760,11 +3040,19 @@ fn draw_statusbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
         .as_deref()
         .map(langs::for_path)
         .unwrap_or(&langs::PLAIN);
-    let (label, color) = match ed.focus {
-        Focus::Editor => (lang.name.to_string(), Color::Indexed(lang.color)),
-        Focus::Explorer => ("explorer".to_string(), Ed::green()),
-        Focus::Search => ("search".to_string(), Color::Indexed(5)),
-        Focus::Terminal => ("terminal".to_string(), Ed::amber()),
+    // the badge names what has the keyboard: a modal card first, then the
+    // panel, and the language while you are editing
+    let (label, color) = if ed.agent_pane.is_some() {
+        ("agent".to_string(), Ed::cyan())
+    } else if ed.hub.is_some() {
+        ("hub".to_string(), Color::Indexed(5))
+    } else {
+        match ed.focus {
+            Focus::Editor => (lang.name.to_string(), Color::Indexed(lang.color)),
+            Focus::Explorer => ("explorer".to_string(), Ed::green()),
+            Focus::Search => ("search".to_string(), Color::Indexed(5)),
+            Focus::Terminal => ("terminal".to_string(), Ed::amber()),
+        }
     };
     let padded = format!(" {label} ");
     x = if icons_enabled() {
@@ -2773,9 +3061,10 @@ fn draw_statusbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout::Rect) {
         put_seg(buf, x, area.y, &padded, seg_bg, color, true) + 1
     };
     let _ = x;
-    // unsaved changes: a dot, not a second copy of the name
+    // unsaved changes: a dot, and nothing around it — no square, no pill,
+    // no background of ours behind a single character
     if ed.file.is_some() && ed.modified {
-        x = put_seg(buf, x, area.y, " ● ", Ed::accent(), seg_bg, false);
+        x = put_seg(buf, x, area.y, " ● ", Ed::accent(), Ed::bar_bg(), false);
     }
     // something is running, and it turns
     if let Some(what) = ed.busy() {
@@ -2842,6 +3131,139 @@ fn search_float_height(results: usize, zone_height: u16) -> u16 {
 /// The agent card: transcript on top, prompt at the bottom, rounded like
 /// everything else. it overlays the editor, and the terminal paints its own
 /// background underneath.
+/// The hub: the boxes side by side. left is the navigation — the sections and
+/// the items of the current one — right is the detail of what you selected.
+/// two rounded cards with air between them, and like every other card they
+/// erase what they cover: the editor must not show through the text.
+fn draw_hub(frame: &mut Frame, hub: &mut crate::hub::Hub, zone: ratatui::layout::Rect) {
+    if zone.width < 60 || zone.height < 10 {
+        return;
+    }
+    // a margin all around, so the cards float instead of filling the screen
+    let zone = ratatui::layout::Rect {
+        x: zone.x + 2,
+        y: zone.y + 1,
+        width: zone.width.saturating_sub(4),
+        height: zone.height.saturating_sub(2),
+    };
+    let left_w = (zone.width / 3).clamp(22, 38);
+    let sp = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(left_w),
+            Constraint::Length(2), // souffle entre les deux cartes
+            Constraint::Min(24),
+        ])
+        .split(zone);
+
+    // ---- left: the sections, then the items of the current one
+    let title = format!(" {} ", hub.current().title());
+    clear_area(frame, sp[0]);
+    let inner = draw_box(frame, sp[0], &[(title, Ed::cyan())], Ed::cyan());
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, name) in crate::hub::section_titles(hub.current()).iter().enumerate() {
+        let current = i == hub.section_index();
+        lines.push(Line::from(Span::styled(
+            format!(" {name}"),
+            Style::default()
+                .fg(if current { Ed::text() } else { Ed::gutter() })
+                .add_modifier(if current {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        )));
+    }
+    lines.push(Line::from(""));
+    // the items start right here: everything above is the section list plus its
+    // blank line, and the highlight must land on the row it belongs to
+    let items_start = hub.section_count() as u16 + 1;
+    let cursor = hub.cursor().min(hub.items().len().saturating_sub(1));
+    for (i, item) in hub.items().iter().enumerate() {
+        let selected = i == cursor;
+        let mut spans = vec![
+            Span::styled(
+                if selected { "▎" } else { " " },
+                Style::default().fg(Ed::accent()),
+            ),
+            Span::styled(
+                format!(" {}", item.label),
+                Style::default().fg(if selected { Ed::text() } else { Ed::dim() }),
+            ),
+        ];
+        if !item.note.is_empty() && !selected {
+            spans.push(Span::styled(
+                format!("  {}", item.note),
+                Style::default().fg(Ed::gutter()),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+    if !hub.items().is_empty() {
+        let y = inner.y + items_start + cursor as u16;
+        if y < inner.bottom() {
+            round_band(
+                frame.buffer_mut(),
+                y,
+                inner.x,
+                inner.right().saturating_sub(1),
+                Ed::sel_row(),
+            );
+        }
+    }
+    // what the box is asking for, when it is asking for something
+    if hub.typing() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!(" {} ", hub.purpose.label()),
+                    Style::default().fg(Ed::bg()).bg(Ed::cyan()),
+                ),
+                Span::styled(format!(" {}▌", hub.input), Style::default().fg(Ed::text())),
+            ])),
+            ratatui::layout::Rect {
+                y: sp[0].bottom().saturating_sub(2),
+                height: 1,
+                ..sp[0]
+            },
+        );
+    } else if !hub.query().is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" ❯ ", Style::default().fg(Ed::accent())),
+                Span::styled(hub.query().to_string(), Style::default().fg(Ed::text())),
+            ])),
+            ratatui::layout::Rect {
+                y: sp[0].bottom().saturating_sub(2),
+                height: 1,
+                ..sp[0]
+            },
+        );
+    }
+
+    // ---- right: what the selection is
+    let hint = hub.current().hint();
+    clear_area(frame, sp[2]);
+    let inner = draw_box(
+        frame,
+        sp[2],
+        &[(format!(" {hint} "), Ed::dim())],
+        Ed::gutter(),
+    );
+    let body: Vec<Line> = wrap(hub.detail(), inner.width.saturating_sub(2) as usize)
+        .into_iter()
+        .take(inner.height as usize)
+        .map(|l| {
+            Line::from(Span::styled(
+                format!(" {l}"),
+                Style::default().fg(Ed::text()),
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(body), inner);
+}
+
 fn draw_agent(frame: &mut Frame, pane: &mut AgentPane, zone: ratatui::layout::Rect) {
     let w = zone.width.saturating_sub(8).min(84);
     let h = (zone.height.saturating_sub(4)).min(20);
@@ -2858,7 +3280,10 @@ fn draw_agent(frame: &mut Frame, pane: &mut AgentPane, zone: ratatui::layout::Re
     let title = if pane.busy {
         format!(" agent · {} ", pane.status)
     } else {
-        " agent ".to_string()
+        match &pane.persona {
+            Some(p) => format!(" agent · {p} "),
+            None => " agent ".to_string(),
+        }
     };
     let inner = draw_box(frame, float, &[(title, Ed::cyan())], Ed::cyan());
 
@@ -3663,6 +4088,9 @@ pub fn run(path: Option<PathBuf>) -> io::Result<()> {
 
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
+    // bracketed paste: the terminal wraps what you paste, so the editor can
+    // take it as a block instead of mistaking it for typing
+    let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
     // Protocole clavier « kitty » : foot l'implémente. Sans lui, foot envoie
     // Ctrl+Tab sous une forme que crossterm ne décode pas — la touche
     // disparaît avant nous. Inoffensif pour les terminaux qui l'ignorent.
@@ -3681,6 +4109,7 @@ pub fn run(path: Option<PathBuf>) -> io::Result<()> {
     if kitty {
         let _ = crossterm::execute!(io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
     }
+    let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
     result
@@ -3713,10 +4142,14 @@ fn loop_run(terminal: &mut ratatui::DefaultTerminal, ed: &mut Editor) -> io::Res
         // barres (2) + bordures (2) + terminal (TERM_H si ouvert) +
         // explorateur (EXPL_W + souffle) — sinon le curseur traverse les
         // bordures en bas de fichier
+        // geometry of the editor box, exactly as draw() lays it out:
+        //   top bar + blank + body + blank + status bar, then the box borders,
+        //   minus the explorer column and its blank, minus the terminal card
+        //   and its blank row.
         let size = terminal.size()?;
-        let term_h = if ed.term.is_some() { TERM_H } else { 0 };
+        let term_h = if ed.term.is_some() { TERM_H + 1 } else { 0 };
         let expl_w = if ed.explorer.is_some() { EXPL_W + 1 } else { 0 };
-        let inner_h = size.height.saturating_sub(2 + 2 + term_h);
+        let inner_h = size.height.saturating_sub(4 + 2 + term_h);
         let inner_w = size.width.saturating_sub(expl_w + 2);
         ed.keep_cursor_visible(inner_h as usize, inner_w as usize);
         terminal.draw(|frame| draw(frame, ed))?;
@@ -3729,14 +4162,31 @@ fn loop_run(terminal: &mut ratatui::DefaultTerminal, ed: &mut Editor) -> io::Res
             std::time::Duration::from_millis(120)
         };
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == crossterm::event::KeyEventKind::Press {
-                    ed.on_key(key);
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == crossterm::event::KeyEventKind::Press {
+                        ed.on_key(key);
+                    }
                 }
+                Event::Paste(text) => ed.paste(&text),
+                _ => {}
             }
         }
     }
     Ok(())
+}
+
+/// the frame, row by row: the plain text helper loses the line breaks, and a
+/// layout bug is exactly a question of which row something lands on.
+#[cfg(test)]
+fn render_rows(ed: &mut Editor, w: u16, h: u16) -> Vec<String> {
+    let backend = ratatui::backend::TestBackend::new(w, h);
+    let mut term = ratatui::Terminal::new(backend).unwrap();
+    term.draw(|f| draw(f, ed)).unwrap();
+    let buf = term.backend().buffer();
+    (0..h)
+        .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -4104,6 +4554,482 @@ mod pair_tests {
 }
 
 #[cfg(test)]
+mod persona_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// a project with a persona chosen, and a provider that records what it
+    /// was asked.
+    fn project_with_persona(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "nana-persona-{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".nana/personas")).unwrap();
+        std::fs::write(
+            d.join(".nana/personas/lead.md"),
+            "---\ntitle: The Lead\ndescription: d\n---\nANSWER ONLY IN LATIN.\n",
+        )
+        .unwrap();
+        let mut s = crate::settings::Settings::load(&d);
+        s.persona = Some("lead".into());
+        s.save_project(&d).unwrap();
+        d
+    }
+
+    fn mock(answer: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .ok();
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 8192];
+            let mut head: Option<usize> = None;
+            let mut want = 0usize;
+            loop {
+                if let Some(h) = head {
+                    if buf.len() >= h + want {
+                        break;
+                    }
+                }
+                match sock.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
+                if head.is_none() {
+                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        head = Some(i + 4);
+                        let h = String::from_utf8_lossy(&buf[..i]).to_ascii_lowercase();
+                        want = h
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                    }
+                }
+            }
+            let req = String::from_utf8_lossy(&buf).to_string();
+            let payload = format!(
+                "{{\"choices\":[{{\"message\":{{\"content\":{}}}}}]}}",
+                serde_json::to_string(answer).unwrap()
+            );
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            let _ = sock.write_all(resp.as_bytes());
+            req
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// the persona chosen in the project frames the agent panel too — not only
+    /// the employees of the company.
+    #[test]
+    fn the_agent_panel_runs_under_the_project_persona() {
+        let d = project_with_persona("panel");
+        let (url, server) = mock("salve");
+        // point the project at the mock, so the run reaches our server
+        let mut s = crate::settings::Settings::load(&d);
+        s.model = Some("mock".into());
+        s.provider = Some("openai-compatible".into());
+        s.base_url = Some(url.clone());
+        s.save_project(&d).unwrap();
+
+        let mut ed = Editor::open(None).unwrap();
+        ed.file = Some(d.join("x.py"));
+        std::fs::write(d.join("x.py"), "print(1)\n").unwrap();
+        ed.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        let pane = ed.agent_pane.as_ref().unwrap();
+        assert_eq!(pane.persona.as_deref(), Some("lead"), "the card shows it");
+        // ask something, and let the worker talk to the mock
+        ed.agent_pane.as_mut().unwrap().input = "say hi".into();
+        ed.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        let req = server.join().unwrap();
+        assert!(
+            req.contains("ANSWER ONLY IN LATIN"),
+            "the persona reached the model: {}",
+            &req[..req.len().min(600)]
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    /// Pasting must not reformat. Typing enter auto-indents — right for
+    /// writing code, wrong for pasting it: the text arrives as it was copied.
+    #[test]
+    fn pasting_keeps_the_text_as_it_was() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.paste("one\ntwo\nthree");
+        assert_eq!(ed.lines, vec!["one", "two", "three"]);
+        assert_eq!(ed.cy, 2, "the cursor ends on the last pasted line");
+
+        // a paste under an indented line must not inherit that indentation
+        ed.lines = vec!["    indented".into(), String::new()];
+        ed.cy = 1;
+        ed.cx = 0;
+        ed.paste("a\nb");
+        assert_eq!(ed.lines[1], "a");
+        assert_eq!(ed.lines[2], "b", "no tab of ours was added");
+
+        // and typing enter still auto-indents: that part is wanted
+        ed.cy = 0;
+        ed.cx = ed.lines[0].len();
+        ed.insert_newline();
+        assert!(
+            ed.lines[1].starts_with("    "),
+            "the auto-indent still works: {:?}",
+            ed.lines
+        );
+    }
+
+    #[test]
+    fn a_paste_lands_at_the_cursor_and_marks_the_buffer_dirty() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.lines = vec!["xx".into()];
+        ed.cx = 1;
+        ed.paste("AB");
+        assert_eq!(ed.lines[0], "xABx");
+        assert!(ed.modified, "the buffer knows it changed");
+        // windows line endings are normalised
+        ed.paste("\r\nZ");
+        assert!(ed.lines.iter().all(|l| !l.contains('\r')), "{:?}", ed.lines);
+    }
+
+    #[test]
+    fn a_paste_cannot_reach_a_modal_card() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.lines = vec!["untouched".into()];
+        ed.agent_pane = Some(AgentPane::new());
+        ed.paste("sneaky");
+        assert_eq!(ed.lines, vec!["untouched"], "the card protects the buffer");
+        ed.agent_pane = None;
+        ed.hub = Some(crate::hub::Hub::open(std::path::Path::new(".")));
+        ed.paste("sneaky");
+        assert_eq!(ed.lines, vec!["untouched"], "the hub too");
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// The loop decides how far it can scroll from a computed inner height.
+    /// If that number does not match the box actually drawn, the cursor walks
+    /// below the visible area — two lines too far, in the case that bit.
+    #[test]
+    fn the_scroll_geometry_matches_the_box_on_screen() {
+        let root = std::env::temp_dir().join(format!("nana-geo-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        let (w, h) = (100u16, 30u16);
+        for with_terminal in [false, true] {
+            let mut ed = Editor::open(None).unwrap();
+            ed.lines = (0..200).map(|i| format!("line {i}")).collect();
+            ed.explorer = Some(Explorer::new(root.clone()));
+            if with_terminal {
+                ed.term = TermPane::spawn(&root, 8, 60).ok();
+            }
+            // exactly what loop_run computes
+            let term_h = if ed.term.is_some() { TERM_H + 1 } else { 0 };
+            let expl_w = if ed.explorer.is_some() { EXPL_W + 1 } else { 0 };
+            let inner_h = h.saturating_sub(4 + 2 + term_h) as usize;
+            let inner_w = w.saturating_sub(expl_w + 2);
+
+            // and what the frame really shows: the editor box's inner height
+            let rows = render_rows(&mut ed, w, h);
+            let top = rows
+                .iter()
+                .position(|r| r.chars().nth(expl_w as usize) == Some('╭'))
+                .expect("the editor box opens");
+            let bottom = rows
+                .iter()
+                .position(|r| r.chars().nth(expl_w as usize) == Some('╰'))
+                .expect("the editor box closes");
+            let drawn_h = bottom - top - 1;
+            assert_eq!(
+                drawn_h, inner_h,
+                "terminal={with_terminal}: the loop believes {inner_h} rows, the box has {drawn_h}"
+            );
+            assert!(
+                inner_w > 10 && inner_h > 3,
+                "the editor has room: {inner_w}x{inner_h}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The cursor never ends up below the box, however far you scroll.
+    #[test]
+    fn the_cursor_stays_inside_the_box() {
+        let root = std::env::temp_dir().join(format!("nana-geo2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        let (w, h) = (100u16, 30u16);
+        let mut ed = Editor::open(None).unwrap();
+        ed.lines = (0..200).map(|i| format!("line {i}")).collect();
+        ed.explorer = Some(Explorer::new(root.clone()));
+        let inner_h = h.saturating_sub(6) as usize;
+        let inner_w = w.saturating_sub(EXPL_W + 3);
+        // walk down the file the way a held key does
+        for _ in 0..200 {
+            ed.cy = (ed.cy + 1).min(ed.lines.len() - 1);
+            ed.keep_cursor_visible(inner_h, inner_w as usize);
+        }
+        assert_eq!(ed.cy, 199);
+        let rows = render_rows(&mut ed, w, h);
+        let top = rows
+            .iter()
+            .position(|r| r.chars().nth(EXPL_W as usize + 1) == Some('╭'))
+            .expect("the editor box opens");
+        let bottom = rows
+            .iter()
+            .position(|r| r.chars().nth(EXPL_W as usize + 1) == Some('╰'))
+            .expect("the editor box closes");
+        let cursor_row = top + 1 + (ed.cy - ed.scroll_y) as usize;
+        assert!(
+            cursor_row < bottom,
+            "the cursor sits at row {cursor_row}, the box ends at {bottom}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod hub_ui_tests {
+    use super::*;
+
+    /// a project with something in every box, so the menu has content.
+    fn seeded() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "nana-hubui-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".nana")).unwrap();
+        let m = crate::memory::Memory::open(&d);
+        m.write(
+            crate::memory::Class::Project,
+            "stack",
+            "rust only, no async",
+        )
+        .unwrap();
+        m.write(crate::memory::Class::User, "aaa-tone", "blunt, no filler")
+            .unwrap();
+        std::fs::create_dir_all(d.join(".nana/skills")).unwrap();
+        std::fs::write(
+            d.join(".nana/skills/release.md"),
+            "---\nname: release\ndescription: cut a release\ntrigger: release\n---\nsteps\n",
+        )
+        .unwrap();
+        d
+    }
+
+    fn editor_at(root: &std::path::Path) -> Editor {
+        let mut ed = Editor::open(None).unwrap();
+        ed.explorer = Some(Explorer::new(root.to_path_buf()));
+        ed
+    }
+
+    #[test]
+    fn ctrl_w_opens_the_hub_and_esc_closes_it() {
+        let d = seeded();
+        let mut ed = editor_at(&d);
+        ed.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert!(ed.hub.is_some(), "the hub opens");
+        // while it is open, the editor does not receive the keys
+        ed.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
+        assert!(
+            ed.lines.iter().all(|l| !l.contains('x')),
+            "the buffer is untouched"
+        );
+        assert_eq!(ed.hub.as_ref().unwrap().query(), "x", "it filters instead");
+        ed.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(ed.hub.is_none(), "esc closes it");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_arrows_walk_the_boxes_and_the_items() {
+        let d = seeded();
+        let mut ed = editor_at(&d);
+        ed.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(
+            ed.hub.as_ref().unwrap().current(),
+            crate::hub::Section::Memory
+        );
+        ed.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::empty()));
+        assert_eq!(
+            ed.hub.as_ref().unwrap().current(),
+            crate::hub::Section::Providers,
+            "right goes to the next box"
+        );
+        ed.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::empty()));
+        assert_eq!(
+            ed.hub.as_ref().unwrap().current(),
+            crate::hub::Section::Memory
+        );
+        ed.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+        assert_eq!(
+            ed.hub.as_ref().unwrap().cursor(),
+            1,
+            "down moves in the list"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn enter_on_a_memory_page_opens_it_in_the_editor() {
+        let d = seeded();
+        let mut ed = editor_at(&d);
+        ed.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        // narrow to one page: typing filters the list
+        for c in "stack".chars() {
+            ed.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+        }
+        assert_eq!(
+            ed.hub
+                .as_ref()
+                .unwrap()
+                .selected()
+                .map(|i| i.label.as_str()),
+            Some("project: stack"),
+            "{:?}",
+            ed.hub.as_ref().unwrap().items()
+        );
+        ed.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(ed.hub.is_none(), "the hub closes behind it");
+        assert!(
+            ed.lines.iter().any(|l| l.contains("rust only")),
+            "the page is in the buffer: {:?}",
+            ed.lines
+        );
+        assert!(
+            ed.file.as_deref().unwrap().ends_with("project/stack.md"),
+            "{:?}",
+            ed.file
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn enter_on_a_skill_hands_it_to_the_agent() {
+        let d = seeded();
+        let mut ed = editor_at(&d);
+        ed.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        ed.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::empty()));
+        ed.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::empty()));
+        assert_eq!(
+            ed.hub.as_ref().unwrap().current(),
+            crate::hub::Section::Skills
+        );
+        ed.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(ed.hub.is_none());
+        let pane = ed.agent_pane.as_ref().expect("the agent panel opens");
+        assert!(
+            pane.input.contains("release"),
+            "the skill is named: {}",
+            pane.input
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// the hub is a card: the editor must not show through it, and the box
+    /// around the selection must sit on the selected row.
+    #[test]
+    fn the_hub_erases_what_it_covers_and_highlights_the_right_row() {
+        let d = seeded();
+        let mut ed = editor_at(&d);
+        ed.lines = (0..20)
+            .map(|i| format!("SECRET_LINE_{i}_MUST_NOT_SHOW"))
+            .collect();
+        // a file inside the fixture, so the hub resolves to *this* project
+        ed.file = Some(d.join("x.py"));
+        ed.ext = "py".into();
+        ed.modified = true;
+        ed.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        for c in "stack".chars() {
+            ed.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+        }
+        let rows = render_rows(&mut ed, 110, 32);
+        // the two cards, found by their titles
+        let left = rows
+            .iter()
+            .position(|r| r.contains(" memory "))
+            .expect("the left card is drawn");
+        let right = rows
+            .iter()
+            .position(|r| r.contains("what this project has learned"))
+            .expect("the right card is drawn");
+        let bottom = rows
+            .iter()
+            .position(|r| r.trim_start().starts_with('╰'))
+            .unwrap_or(rows.len() - 1);
+        for row in &rows[left..=bottom] {
+            assert!(
+                !row.contains("SECRET_LINE"),
+                "the editor shows through the hub: {row}"
+            );
+        }
+        assert!(right >= left, "the cards are side by side");
+        // the highlight is on the first item, right under the section list
+        // the band's left cap replaces the marker cell: look for the cap and
+        // the label on the same row
+        let band = rows
+            .iter()
+            .position(|r| r.contains('\u{E0B6}') && r.contains("project: stack"))
+            .expect("the selected row is marked");
+        assert!(
+            band > left && band < bottom,
+            "the band is inside the card: {band} in {left}..{bottom}"
+        );
+        // and the frame is still a frame: the bars are drawn, the cards are
+        // cards, and the buffer is not smeared across the screen
+        assert!(rows[0].contains("nana"), "the top bar is there");
+        assert!(
+            rows.last().unwrap().contains("ln 1, col 1"),
+            "the status bar is there"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_empty_project_still_shows_both_cards() {
+        let d = std::env::temp_dir().join(format!("nana-hubempty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let mut ed = editor_at(&d);
+        ed.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        let rows = render_rows(&mut ed, 110, 32);
+        assert!(rows.iter().any(|r| r.contains(" memory ")), "the left card");
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("what this project has learned")),
+            "the right card, with its hint"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("empty")),
+            "and it says the box is empty"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
 mod float_tests {
     use super::*;
 
@@ -4113,7 +5039,7 @@ mod float_tests {
     #[test]
     fn a_card_erases_the_text_under_it() {
         let mut ed = Editor::open(None).unwrap();
-        ed.lines = (0..14)
+        ed.lines = (0..20)
             .map(|i| format!("SECRET_LINE_{i}_SHOULD_NOT_SHOW_THROUGH"))
             .collect();
         ed.file = Some(std::path::PathBuf::from("x.py"));
@@ -4121,10 +5047,17 @@ mod float_tests {
         ed.modified = true;
         ed.agent_pane = Some(AgentPane::new());
         let text = render_text(&mut ed, 100, 30);
+        // everything between the card's top border and its bottom one
+        let start = text.find("╭─ agent").expect("the card is drawn");
+        let rest = &text[start..];
+        let end = rest.find('╯').expect("a bottom border") + '╯'.len_utf8();
+        let card = &rest[..end];
         assert!(
-            !text.contains("SECRET_LINE_5"),
-            "the editor shows through the card:\n{text}"
+            !card.contains("SECRET_LINE"),
+            "the editor shows through the card:\n{card}"
         );
+        // and the editor is still drawn elsewhere: a card, not a blank screen
+        assert!(text.contains("SECRET_LINE"), "the editor disappeared");
     }
 }
 

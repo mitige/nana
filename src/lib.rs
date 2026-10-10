@@ -13,12 +13,14 @@
 pub mod agent;
 pub mod ai;
 pub mod check;
+pub mod company;
 pub mod config;
 pub mod diag;
 pub mod editor;
 pub mod explorer;
 pub mod header;
 pub mod highlight;
+pub mod hub;
 pub mod langs;
 pub mod memory;
 pub mod persona;

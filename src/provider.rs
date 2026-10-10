@@ -288,7 +288,9 @@ impl Client {
         if api_key.is_none() && provider.id == "dashscope" {
             api_key = key_from_dsh("OPP_API_KEY").or_else(|| key_from_env("OPP_API_KEY"));
         }
-        if api_key.is_none() && !provider.keyless {
+        // a local endpoint (a mock, or your own gateway) does not want a key
+        let local = base_url.contains("127.0.0.1") || base_url.contains("localhost");
+        if api_key.is_none() && !provider.keyless && !local {
             return Err(format!(
                 "no api key for {} — set {} or add it to ~/.dsh/.credentials.yaml",
                 provider.id,
