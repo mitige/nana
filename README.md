@@ -167,8 +167,6 @@ csv, diff, dotenv, gitconfig.
 nana is also an agent. it reads your project, it can act on it, and it keeps
 what it learns — per project, on disk, in markdown you can read and edit.
 
-![the hub, boxes with rounded edges](docs/shots/test5.png)
-
 ### the panel
 
 `ctrl+a` opens the agent. the card takes the keyboard: type your request,
@@ -217,6 +215,8 @@ memory is **scoped by construction**: an agent opened in one project cannot
 read or write another project's memory. that is what keeps it useful instead
 of bloated. the prompt carries only the index — names, not contents — and the
 agent reads a page when it becomes relevant.
+
+![the hub, boxes with rounded edges](docs/shots/test5.png)
 
 ```sh
 nana --memory list
