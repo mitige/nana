@@ -1271,9 +1271,7 @@ impl Editor {
             self.agent_view.lines.push(w.text[w.shown].clone());
             w.shown += 1;
             self.agent_view.cy = self.agent_view.lines.len() - 1;
-            self.agent_view.cx = self.agent_view.lines[self.agent_view.cy]
-                .chars()
-                .count();
+            self.agent_view.cx = self.agent_view.lines[self.agent_view.cy].chars().count();
         }
         if w.shown >= w.text.len() {
             if self.agent_view.lines.is_empty() {
@@ -3445,7 +3443,11 @@ fn draw_agent_column(frame: &mut Frame, ed: &mut Editor, area: ratatui::layout::
     fill(frame, area, Style::default().bg(Ed::bg()));
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(30), Constraint::Length(1), Constraint::Min(30)])
+        .constraints([
+            Constraint::Min(30),
+            Constraint::Length(1),
+            Constraint::Min(30),
+        ])
         .split(area);
     let ide = cols[0];
     let agent = cols[2];
@@ -3493,7 +3495,10 @@ fn draw_agent_view(frame: &mut Frame, view: &AgentView, zone: ratatui::layout::R
                     format!("{:>4} ", i + 1),
                     Style::default().fg(if cur { Ed::text() } else { Ed::gutter() }),
                 ),
-                Span::styled(clip(text, inner.width.saturating_sub(5) as usize), Style::default().fg(Ed::text())),
+                Span::styled(
+                    clip(text, inner.width.saturating_sub(5) as usize),
+                    Style::default().fg(Ed::text()),
+                ),
             ])
         })
         .collect();
@@ -6279,7 +6284,11 @@ mod live_write_tests {
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
-        assert_eq!(ed.live.len(), 1, "the write is taken over by the agent view");
+        assert_eq!(
+            ed.live.len(),
+            1,
+            "the write is taken over by the agent view"
+        );
         ed.play_live();
         let text = render_text(&mut ed, 160, 40);
         assert!(text.contains("fn one() {}"), "one line after one step");
@@ -6288,7 +6297,10 @@ mod live_write_tests {
         ed.play_live();
         ed.play_live();
         let text = render_text(&mut ed, 160, 40);
-        assert!(text.contains("fn three() {}"), "the file is whole on screen");
+        assert!(
+            text.contains("fn three() {}"),
+            "the file is whole on screen"
+        );
         assert_eq!(
             ed.lines,
             vec!["my own line".to_string()],

@@ -1,5 +1,15 @@
 # changelog
 
+## 2.1.0
+
+- memory is a world model: each page carries a confidence, a date and an
+  optional check the agent runs before trusting it.
+- the world map: memory is drawn as lanes over time, with a section in the hub.
+- the agent's trail: each action sits in time behind its card, and a file the
+  agent reads is announced like a write.
+- the agent reports each file it writes.
+- `cargo fmt --check` is clean again: the ci no longer fails before the tests.
+
 ## 2.0.0
 
 - nana opens on the hub: the menu is the only thing on screen at start, and
