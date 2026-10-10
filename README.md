@@ -6,9 +6,7 @@ version 2.0.
 
 ![nana, the welcome screen](docs/shots/image.png)
 
-<!-- PLACEHOLDER: capture de l'accueil en 2.0 (hub ctrl+w) — à remplacer -->
-> **placeholder** — capture à faire : le hub (`ctrl+w`) seul à l'écran, bords arrondis.
-> chemin prévu : `docs/shots/hub-2.0.png`
+![the hub, alone on screen, rounded edges](docs/shots/hub-2.0.png)
 
 ## what it is
 
@@ -30,8 +28,7 @@ build systems and frameworks. the whole table lives in one file
 
 ## screenshots
 
-<!-- PLACEHOLDER: capture du terminal ouvert avec super+t -->
-> **placeholder** — capture à faire : `super+t` ouvre le terminal intégré. chemin : `docs/shots/terminal-super-t.png`
+![the built-in terminal, opened with super+t](docs/shots/terminal-super-t.png)
 
 ### c, in a project
 
@@ -177,8 +174,7 @@ csv, diff, dotenv, gitconfig.
 nana is also an agent. it reads your project, it can act on it, and it keeps
 what it learns — per project, on disk, in markdown you can read and edit.
 
-<!-- PLACEHOLDER: capture du hub (ctrl+w), boîtes arrondies, rien d'autre à l'écran -->
-> **placeholder** — capture à faire : `ctrl+w`, le hub seul. chemin : `docs/shots/hub-2.0.png`
+![the hub, boxes with rounded edges](docs/shots/hub-2.0.png)
 
 ### the panel
 
