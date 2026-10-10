@@ -128,9 +128,21 @@ pub fn specs() -> Vec<ToolSpec> {
                 json!({
                     "class": {"type": "string"},
                     "name": {"type": "string"},
-                    "content": {"type": "string"}
+                    "content": {"type": "string"},
+                    "confidence": {"type": "string", "description": "low, medium or high; medium by default"},
+                    "check": {"type": "string", "description": "optional shell command that exits 0 while the page is still true"}
                 }),
                 json!(["class", "name", "content"]),
+            ),
+        },
+        ToolSpec {
+            name: "memory_check".into(),
+            description: "run the check attached to a memory page. use it before you rely on a \
+                          page that says it is checkable; a page that does not hold is wrong and must be corrected."
+                .into(),
+            parameters: obj(
+                json!({"class": {"type": "string"}, "name": {"type": "string"}}),
+                json!(["class", "name"]),
             ),
         },
     ]
@@ -356,9 +368,47 @@ pub fn run(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> {
             }
             Ok(entries
                 .iter()
-                .map(|e| format!("{}: {} — {}", e.class.id(), e.name, e.title))
+                .map(|e| {
+                    let mut line = format!("{}: {} — {}", e.class.id(), e.name, e.title);
+                    if let Some(u) = &e.updated {
+                        line.push_str(&format!(" (updated {u}"));
+                        if let Some(c) = e.confidence {
+                            line.push_str(&format!(", confidence {}", c.id()));
+                        }
+                        if e.stale() {
+                            line.push_str(", stale: check it before trusting it");
+                        }
+                        line.push(')');
+                    }
+                    if e.check.is_some() {
+                        line.push_str(" [checkable]");
+                    }
+                    line
+                })
                 .collect::<Vec<_>>()
                 .join("\n"))
+        }
+        "memory_check" => {
+            let class = Class::parse(arg(args, "class")?)
+                .ok_or_else(|| "classes are user, feedback, project, reference".to_string())?;
+            let name = arg(args, "name")?;
+            let entry = ctx
+                .memory
+                .list()
+                .into_iter()
+                .find(|e| e.class == class && e.name == name)
+                .ok_or_else(|| format!("no page « {name} » in {}", class.id()))?;
+            // the page's own check is a shell command, so it passes the same
+            // gate as any shell call: a destructive check needs approval too.
+            let Some(check) = entry.check else {
+                return Ok(format!("no check on « {name} »: its claim is not verified by a command"));
+            };
+            let out = run("run_shell", &json!({"command": check}), ctx)?;
+            if out.starts_with("exit 0") {
+                Ok(format!("holds: {name}"))
+            } else {
+                Ok(format!("does not hold: {name}\n{out}"))
+            }
         }
         "memory_read" => {
             let class = Class::parse(arg(args, "class")?)
@@ -368,9 +418,19 @@ pub fn run(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> {
         "memory_write" => {
             let class = Class::parse(arg(args, "class")?)
                 .ok_or_else(|| "classes are user, feedback, project, reference".to_string())?;
-            let path = ctx
-                .memory
-                .write(class, arg(args, "name")?, arg(args, "content")?)?;
+            let confidence = match args.get("confidence").and_then(Value::as_str) {
+                Some(c) => crate::memory::Confidence::parse(c)
+                    .ok_or_else(|| "confidence is low, medium or high".to_string())?,
+                None => crate::memory::Confidence::Medium,
+            };
+            let check = args.get("check").and_then(Value::as_str).filter(|c| !c.trim().is_empty());
+            let path = ctx.memory.write_checked(
+                class,
+                arg(args, "name")?,
+                arg(args, "content")?,
+                confidence,
+                check,
+            )?;
             Ok(format!("remembered in {}", path.display()))
         }
         other => Err(format!("unknown tool « {other} »")),
@@ -547,6 +607,59 @@ mod tests {
     }
 
     #[test]
+    fn memory_list_says_when_a_page_was_checked_and_how_sure_we_are() {
+        let d = tmp("listmeta");
+        let ctx = Ctx::new(&d, true);
+        run(
+            "memory_write",
+            &json!({"class": "project", "name": "stack", "content": "rust only", "confidence": "low"}),
+            &ctx,
+        )
+        .unwrap();
+        let listed = run("memory_list", &json!({}), &ctx).unwrap();
+        assert!(listed.contains("updated "), "no date in the list: {listed}");
+        assert!(listed.contains("confidence low"), "no confidence: {listed}");
+        assert!(!listed.contains("stale"), "a fresh page is stale: {listed}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_page_can_carry_a_check_the_agent_runs_before_trusting_it() {
+        let d = tmp("check");
+        let ctx = Ctx::new(&d, true);
+        std::fs::write(d.join("Cargo.toml"), "[package]\n").unwrap();
+        run(
+            "memory_write",
+            &json!({"class": "project", "name": "manifest", "content": "a cargo manifest exists",
+                    "check": "test -f Cargo.toml"}),
+            &ctx,
+        )
+        .unwrap();
+        let holds = run("memory_check", &json!({"class": "project", "name": "manifest"}), &ctx).unwrap();
+        assert!(holds.starts_with("holds"), "{holds}");
+
+        run(
+            "memory_write",
+            &json!({"class": "project", "name": "gone", "content": "a file that is not there",
+                    "check": "test -f missing.txt"}),
+            &ctx,
+        )
+        .unwrap();
+        let broken = run("memory_check", &json!({"class": "project", "name": "gone"}), &ctx).unwrap();
+        assert!(broken.starts_with("does not hold"), "{broken}");
+
+        run(
+            "memory_write",
+            &json!({"class": "project", "name": "bare", "content": "no check here"}),
+            &ctx,
+        )
+        .unwrap();
+        let none = run("memory_check", &json!({"class": "project", "name": "bare"}), &ctx).unwrap();
+        assert!(none.contains("no check"), "{none}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn every_declared_tool_is_executable() {
         // a spec with no implementation would be a lie told to the model
         let d = tmp("specs");
@@ -561,6 +674,7 @@ mod tests {
                 "grep" => json!({"pattern": "x"}),
                 "run_shell" => json!({"command": "true"}),
                 "memory_list" => json!({}),
+                "memory_check" => json!({"class": "user", "name": "absent"}),
                 "memory_read" => json!({"class": "user", "name": "absent"}),
                 "memory_write" => json!({"class": "user", "name": "n", "content": "c"}),
                 other => panic!("no test args for {other}"),

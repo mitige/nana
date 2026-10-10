@@ -44,6 +44,39 @@ impl Class {
     }
 }
 
+/// how sure the writer was. a guess written as a fact is the usual way a
+/// memory goes wrong, so the level is kept next to the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confidence {
+    Low,
+    Medium,
+    High,
+}
+
+impl Confidence {
+    pub fn id(&self) -> &'static str {
+        match self {
+            Confidence::Low => "low",
+            Confidence::Medium => "medium",
+            Confidence::High => "high",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Confidence> {
+        match s.trim().to_lowercase().as_str() {
+            "low" => Some(Confidence::Low),
+            "medium" => Some(Confidence::Medium),
+            "high" => Some(Confidence::High),
+            _ => None,
+        }
+    }
+}
+
+/// a page older than this is reported as stale: long enough that a stable
+/// convention is not flagged every week, short enough that a decision made
+/// before a refactor gets a second look.
+const STALE_DAYS: i64 = 90;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub class: Class,
@@ -51,6 +84,115 @@ pub struct Entry {
     pub path: PathBuf,
     /// the first heading line, for the index
     pub title: String,
+    /// the day the page was last written, as yyyy-mm-dd
+    pub updated: Option<String>,
+    pub confidence: Option<Confidence>,
+    /// a shell command that holds while the page is still true
+    pub check: Option<String>,
+}
+
+impl Entry {
+    /// a page with no date is undated, not stale: we do not claim to know.
+    pub fn stale(&self) -> bool {
+        self.updated
+            .as_deref()
+            .and_then(days_from_iso)
+            .is_some_and(|d| days_now() - d > STALE_DAYS)
+    }
+}
+
+/// the metadata lives at the foot of the page, as comments, so the page still
+/// opens with its own heading and reads the same in any markdown viewer.
+fn footer(updated: &str, confidence: Confidence, check: Option<&str>) -> String {
+    let mut out = format!(
+        "<!-- nana: updated {updated}, confidence {} -->",
+        confidence.id()
+    );
+    if let Some(c) = check {
+        out.push_str(&format!("\n<!-- nana check: {} -->", c.trim()));
+    }
+    out
+}
+
+fn is_footer(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with("<!-- nana:") || t.starts_with("<!-- nana check:")
+}
+
+/// reads the footer back. unknown or missing fields stay None.
+fn read_footer(text: &str) -> (Option<String>, Option<Confidence>, Option<String>) {
+    let mut updated = None;
+    let mut confidence = None;
+    let mut check = None;
+    for line in text.lines().map(str::trim) {
+        if let Some(inner) = line
+            .strip_prefix("<!-- nana check:")
+            .and_then(|s| s.strip_suffix("-->"))
+        {
+            check = Some(inner.trim().to_string()).filter(|s| !s.is_empty());
+        } else if let Some(inner) = line
+            .strip_prefix("<!-- nana:")
+            .and_then(|s| s.strip_suffix("-->"))
+        {
+            for part in inner.split(',') {
+                let mut kv = part.split_whitespace();
+                match (kv.next(), kv.next()) {
+                    (Some("updated"), Some(d)) => updated = Some(d.to_string()),
+                    (Some("confidence"), Some(c)) => confidence = Confidence::parse(c),
+                    _ => {}
+                }
+            }
+        }
+    }
+    (updated, confidence, check)
+}
+
+fn days_now() -> i64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    secs.div_euclid(86_400)
+}
+
+fn today_iso() -> String {
+    let (y, m, d) = civil_from_days(days_now());
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// howard hinnant's day-count algorithm: no calendar crate for one date.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+fn days_from_iso(s: &str) -> Option<i64> {
+    let mut parts = s.trim().split('-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: i64 = parts.next()?.parse().ok()?;
+    let d: i64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    Some(days_from_civil(y, m, d))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,16 +232,46 @@ impl Memory {
     }
 
     pub fn write(&self, class: Class, name: &str, body: &str) -> Result<PathBuf, String> {
+        self.write_rated(class, name, body, Confidence::Medium)
+    }
+
+    pub fn write_rated(
+        &self,
+        class: Class,
+        name: &str,
+        body: &str,
+        confidence: Confidence,
+    ) -> Result<PathBuf, String> {
+        self.write_checked(class, name, body, confidence, None)
+    }
+
+    /// `check` is a shell command that holds while the page is still true.
+    pub fn write_checked(
+        &self,
+        class: Class,
+        name: &str,
+        body: &str,
+        confidence: Confidence,
+        check: Option<&str>,
+    ) -> Result<PathBuf, String> {
         let path = self.safe_path(class, name)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let title = name.trim().trim_end_matches(".md");
-        let text = if body.trim_start().starts_with('#') {
+        // a page read back and written again must not stack two footers
+        let kept: Vec<&str> = body.lines().filter(|l| !is_footer(l)).collect();
+        let body = kept.join("\n");
+        let body = body.trim_end();
+        let page = if body.trim_start().starts_with('#') {
             body.to_string()
         } else {
-            format!("# {title}\n\n{}\n", body.trim_end())
+            format!("# {title}\n\n{body}")
         };
+        let text = format!(
+            "{page}\n\n{}\n",
+            footer(&today_iso(), confidence, check)
+        );
         std::fs::write(&path, text).map_err(|e| e.to_string())?;
         Ok(path)
     }
@@ -132,19 +304,21 @@ impl Memory {
                         .and_then(|s| s.to_str())
                         .unwrap_or_default()
                         .to_string();
-                    let title = std::fs::read_to_string(&p)
-                        .ok()
-                        .and_then(|t| {
-                            t.lines()
-                                .find(|l| l.trim_start().starts_with('#'))
-                                .map(|l| l.trim_start_matches('#').trim().to_string())
-                        })
+                    let text = std::fs::read_to_string(&p).unwrap_or_default();
+                    let title = text
+                        .lines()
+                        .find(|l| l.trim_start().starts_with('#'))
+                        .map(|l| l.trim_start_matches('#').trim().to_string())
                         .unwrap_or_else(|| name.clone());
+                    let (updated, confidence, check) = read_footer(&text);
                     Entry {
                         class,
                         name,
                         path: p,
                         title,
+                        updated,
+                        confidence,
+                        check,
                     }
                 })
                 .collect();
@@ -302,5 +476,77 @@ mod tests {
         assert_eq!(m.list().len(), 1);
         assert_eq!(m.list()[0].name, "two");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_new_page_is_dated_and_rated_medium_by_default() {
+        let d = tmp("dated");
+        let m = Memory::open(&d);
+        m.write(Class::Project, "stack", "rust only").unwrap();
+        let text = m.read(Class::Project, "stack").unwrap();
+        assert!(text.starts_with("# stack"), "the heading still comes first: {text}");
+        assert!(
+            text.contains("<!-- nana: updated ") && text.contains("confidence medium"),
+            "{text}"
+        );
+        let e = &m.list()[0];
+        assert_eq!(e.updated.as_deref(), Some(today_iso().as_str()));
+        assert_eq!(e.confidence, Some(Confidence::Medium));
+        assert!(!e.stale(), "a page written now is not stale");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_writer_can_rate_its_own_confidence() {
+        let d = tmp("rated");
+        let m = Memory::open(&d);
+        m.write_rated(Class::Project, "guess", "maybe async", Confidence::Low)
+            .unwrap();
+        let e = &m.list()[0];
+        assert_eq!(e.confidence, Some(Confidence::Low));
+        assert_eq!(Confidence::parse(" High "), Some(Confidence::High));
+        assert_eq!(Confidence::parse("sure"), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_page_older_than_the_limit_is_stale() {
+        let d = tmp("stale");
+        let m = Memory::open(&d);
+        let dir = d.join(".nana/memory/project");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("old.md"),
+            "# old\n\nold fact\n\n<!-- nana: updated 2001-01-01, confidence high -->\n",
+        )
+        .unwrap();
+        let e = m.list().into_iter().find(|e| e.name == "old").unwrap();
+        assert!(e.stale(), "a page from 2001 must be stale");
+        assert_eq!(e.confidence, Some(Confidence::High));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_page_without_a_date_is_undated_not_stale() {
+        let d = tmp("undated");
+        let m = Memory::open(&d);
+        let dir = d.join(".nana/memory/user");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tone.md"), "# tone\n\nblunt\n").unwrap();
+        let e = m.list().into_iter().find(|e| e.name == "tone").unwrap();
+        assert_eq!(e.updated, None);
+        assert_eq!(e.confidence, None);
+        assert!(!e.stale(), "no date means no claim of staleness");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn calendar_dates_convert_both_ways() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(civil_from_days(19723), (2024, 1, 1));
+        let leap = days_from_iso("2024-02-29").unwrap();
+        assert_eq!(civil_from_days(leap), (2024, 2, 29));
+        assert_eq!(days_from_iso("2024-13-01"), None);
+        assert_eq!(days_from_iso("not a date"), None);
     }
 }

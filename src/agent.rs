@@ -178,9 +178,12 @@ impl Agent {
             name: "memory",
             text: format!(
                 "{known}read a page with the memory_read tool when it matters. \
-                 write one with memory_write as soon as you learn something durable: \
-                 a convention, a decision, a fact about the user, a pitfall you hit. \
-                 check memory before you start a task, and record what you learned at the end."
+                 treat memory as a world model of this project: what is true of its state, \
+                 its conventions, and how it behaves. before you act on a page, say what you \
+                 expect from it; after acting, check the result with a tool against that expectation. \
+                 when reality differs, correct the page with memory_write rather than trusting it. \
+                 write a page as soon as you learn something durable: a convention, a decision, \
+                 a fact about the user, a pitfall you hit. record what you learned at the end."
             ),
         });
         let wiki = crate::knowledge::index(&self.root);
@@ -482,6 +485,24 @@ mod tests {
         let p = a.system_prompt("refactor the parser");
         assert!(p.contains("memory_write"), "no write nudge: {p}");
         assert!(p.contains("memory_read"), "no read nudge: {p}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn memory_is_a_world_model_the_agent_checks_against_reality() {
+        let d = tmp("world");
+        let a = Agent::with_client(
+            &d,
+            Settings::default(),
+            Client::local("http://127.0.0.1:1", "m"),
+        );
+        let p = a.system_prompt("refactor the parser");
+        assert!(p.contains("world model"), "memory is not framed as a model: {p}");
+        assert!(p.contains("expect"), "no expectation before acting: {p}");
+        assert!(
+            p.contains("correct the page"),
+            "a wrong belief is never corrected: {p}"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
