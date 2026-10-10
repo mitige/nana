@@ -6005,6 +6005,26 @@ mod float_tests {
         }
     }
 
+    /// the memory the agent uses is in the card's trail: a page it reads or
+    /// lists is a visible step, not something that happens unseen.
+    #[test]
+    fn the_memory_functions_the_agent_uses_are_in_the_trail() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        pane.trail.push(crate::trail::Step {
+            lane: crate::trail::Lane::Tool,
+            label: "memory_read {\"class\":\"project\",\"name\":\"parser\"}".into(),
+            at: 0.0,
+            ok: true,
+        });
+        ed.agent_pane = Some(pane);
+        let text = render_text(&mut ed, 160, 40);
+        assert!(
+            text.contains("memory_read"),
+            "the memory read is drawn in the agent card:\n{text}"
+        );
+    }
+
     /// the agent's trail is drawn under the card, and the ide stays off the
     /// screen like it does for the card alone.
     #[test]

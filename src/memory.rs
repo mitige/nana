@@ -73,6 +73,13 @@ impl Confidence {
     }
 }
 
+/// retention halves after this many days, plus this many days per use, up to
+/// the cap. a page nobody reads fades in a month; a page read often lasts.
+const HALF_LIFE_DAYS: i64 = 30;
+const MAX_HALF_LIFE_DAYS: i64 = 365;
+/// below this share of its strength a page is reported as forgotten.
+const FORGET_BELOW: f64 = 0.25;
+
 /// a page older than this is reported as stale: long enough that a stable
 /// convention is not flagged every week, short enough that a decision made
 /// before a refactor gets a second look.
@@ -90,6 +97,10 @@ pub struct Entry {
     pub confidence: Option<Confidence>,
     /// a shell command that holds while the page is still true
     pub check: Option<String>,
+    /// how many times the page was read or recalled
+    pub uses: u32,
+    /// the day of the last use, as yyyy-mm-dd
+    pub used: Option<String>,
 }
 
 impl Entry {
@@ -100,13 +111,37 @@ impl Entry {
             .and_then(days_from_iso)
             .is_some_and(|d| days_now() - d > STALE_DAYS)
     }
+
+    /// how much of the page is still held, from 1 (just used) towards 0.
+    /// it halves every half-life; a page used often has a longer half-life.
+    /// a page with no use day falls back to its last write.
+    pub fn retention(&self) -> f64 {
+        let day = self.used.as_deref().or(self.updated.as_deref());
+        let Some(age) = day.and_then(days_from_iso).map(|d| days_now() - d) else {
+            return 1.0;
+        };
+        let half_life = (HALF_LIFE_DAYS * (1 + self.uses as i64)).min(MAX_HALF_LIFE_DAYS);
+        0.5f64.powf(age.max(0) as f64 / half_life as f64)
+    }
+
+    /// a page whose retention fell under the floor is a candidate for removal;
+    /// user pages are never forgotten by age, the user's own words stay.
+    pub fn forgotten(&self) -> bool {
+        self.class != Class::User && self.retention() < FORGET_BELOW
+    }
 }
 
 /// the metadata lives at the foot of the page, as comments, so the page still
 /// opens with its own heading and reads the same in any markdown viewer.
-fn footer(updated: &str, confidence: Confidence, check: Option<&str>) -> String {
+fn footer(
+    updated: &str,
+    confidence: Confidence,
+    check: Option<&str>,
+    uses: u32,
+    used: &str,
+) -> String {
     let mut out = format!(
-        "<!-- nana: updated {updated}, confidence {} -->",
+        "<!-- nana: updated {updated}, confidence {}, uses {uses}, used {used} -->",
         confidence.id()
     );
     if let Some(c) = check {
@@ -121,16 +156,14 @@ fn is_footer(line: &str) -> bool {
 }
 
 /// reads the footer back. unknown or missing fields stay None.
-fn read_footer(text: &str) -> (Option<String>, Option<Confidence>, Option<String>) {
-    let mut updated = None;
-    let mut confidence = None;
-    let mut check = None;
+fn read_footer(text: &str) -> Footer {
+    let mut f = Footer::default();
     for line in text.lines().map(str::trim) {
         if let Some(inner) = line
             .strip_prefix("<!-- nana check:")
             .and_then(|s| s.strip_suffix("-->"))
         {
-            check = Some(inner.trim().to_string()).filter(|s| !s.is_empty());
+            f.check = Some(inner.trim().to_string()).filter(|s| !s.is_empty());
         } else if let Some(inner) = line
             .strip_prefix("<!-- nana:")
             .and_then(|s| s.strip_suffix("-->"))
@@ -138,14 +171,25 @@ fn read_footer(text: &str) -> (Option<String>, Option<Confidence>, Option<String
             for part in inner.split(',') {
                 let mut kv = part.split_whitespace();
                 match (kv.next(), kv.next()) {
-                    (Some("updated"), Some(d)) => updated = Some(d.to_string()),
-                    (Some("confidence"), Some(c)) => confidence = Confidence::parse(c),
+                    (Some("updated"), Some(d)) => f.updated = Some(d.to_string()),
+                    (Some("confidence"), Some(c)) => f.confidence = Confidence::parse(c),
+                    (Some("uses"), Some(n)) => f.uses = n.parse().unwrap_or(0),
+                    (Some("used"), Some(d)) => f.used = Some(d.to_string()),
                     _ => {}
                 }
             }
         }
     }
-    (updated, confidence, check)
+    f
+}
+
+#[derive(Default)]
+struct Footer {
+    updated: Option<String>,
+    confidence: Option<Confidence>,
+    check: Option<String>,
+    uses: u32,
+    used: Option<String>,
 }
 
 pub fn today_days() -> i64 {
@@ -278,7 +322,14 @@ impl Memory {
         } else {
             format!("# {title}\n\n{body}")
         };
-        let text = format!("{page}\n\n{}\n", footer(&today_iso(), confidence, check));
+        let today = today_iso();
+        let uses = std::fs::read_to_string(&path)
+            .map(|t| read_footer(&t).uses)
+            .unwrap_or(0);
+        let text = format!(
+            "{page}\n\n{}\n",
+            footer(&today, confidence, check, uses, &today)
+        );
         std::fs::write(&path, &text).map_err(|e| e.to_string())?;
         self.append_history(class, title, &today_iso(), &text);
         Ok(path)
@@ -356,6 +407,26 @@ impl Memory {
         std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    /// a use of a page: counted in its footer, and its age restarts. the body
+    /// is not touched, so a use is never mistaken for an edit.
+    pub fn reinforce(&self, class: Class, name: &str) -> Result<(), String> {
+        let path = self.safe_path(class, name)?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let f = read_footer(&text);
+        let body: Vec<&str> = text.lines().filter(|l| !is_footer(l)).collect();
+        let body = body.join("\n");
+        let body = body.trim_end();
+        let updated = f.updated.unwrap_or_else(today_iso);
+        let confidence = f.confidence.unwrap_or(Confidence::Medium);
+        let today = today_iso();
+        let out = format!(
+            "{body}\n\n{}\n",
+            footer(&updated, confidence, f.check.as_deref(), f.uses + 1, &today)
+        );
+        std::fs::write(&path, out).map_err(|e| e.to_string())
+    }
+
     pub fn forget(&self, class: Class, name: &str) -> Result<(), String> {
         let path = self.safe_path(class, name)?;
         std::fs::remove_file(&path).map_err(|e| e.to_string())
@@ -385,15 +456,17 @@ impl Memory {
                         .find(|l| l.trim_start().starts_with('#'))
                         .map(|l| l.trim_start_matches('#').trim().to_string())
                         .unwrap_or_else(|| name.clone());
-                    let (updated, confidence, check) = read_footer(&text);
+                    let f = read_footer(&text);
                     Entry {
                         class,
                         name,
                         path: p,
                         title,
-                        updated,
-                        confidence,
-                        check,
+                        updated: f.updated,
+                        confidence: f.confidence,
+                        check: f.check,
+                        uses: f.uses,
+                        used: f.used,
                     }
                 })
                 .collect();
@@ -466,6 +539,7 @@ impl Memory {
             } else {
                 format!(" ({})", flags.join("; "))
             };
+            let _ = self.reinforce(e.class, &e.name);
             let block = format!("--- {}/{}{flag}\n{}\n", e.class.id(), e.name, body.trim());
             if out.chars().count() + block.chars().count() > budget {
                 let room = budget.saturating_sub(out.chars().count());
@@ -512,10 +586,14 @@ impl Memory {
         let entries = self.list();
         let mut bodies: Vec<(String, Vec<String>)> = Vec::new();
         let mut stale = Vec::new();
+        let mut forgotten = Vec::new();
         for e in &entries {
             let key = format!("{}/{}", e.class.id(), e.name);
             if e.stale() {
                 stale.push(key.clone());
+            }
+            if e.forgotten() {
+                forgotten.push(key.clone());
             }
             if let Ok(text) = std::fs::read_to_string(&e.path) {
                 bodies.push((key, words_of(&text)));
@@ -529,7 +607,11 @@ impl Memory {
                 }
             }
         }
-        Audit { duplicates, stale }
+        Audit {
+            duplicates,
+            stale,
+            forgotten,
+        }
     }
 
     /// the page the agent gets shown: names and titles, not the whole store.
@@ -573,6 +655,8 @@ pub struct Audit {
     pub duplicates: Vec<(String, String)>,
     /// `class/name` of every page past the staleness limit
     pub stale: Vec<String>,
+    /// `class/name` of every page whose retention fell under the floor
+    pub forgotten: Vec<String>,
 }
 
 /// two pages are the same thing when their words overlap this much (jaccard).
@@ -615,6 +699,118 @@ pub fn parse_links(text: &str) -> Vec<String> {
         rest = &after[close + 2..];
     }
     out
+}
+
+/// one summary the model proposes: it replaces the pages named in `replaces`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Summary {
+    pub class: Class,
+    pub name: String,
+    pub body: String,
+    pub replaces: Vec<String>,
+}
+
+/// the prompt that asks the model to fold related pages into summaries.
+pub fn consolidation_prompt(root: &Memory) -> String {
+    let mut pages = String::new();
+    for e in root.list() {
+        let Ok(text) = std::fs::read_to_string(&e.path) else {
+            continue;
+        };
+        pages.push_str(&format!(
+            "\n--- {}/{} ---\n{}\n",
+            e.class.id(),
+            e.name,
+            text
+        ));
+    }
+    format!(
+        "you are consolidating this project's memory: several short pages that \
+         overlap can become one summary. keep every fact that still matters, drop \
+         what is repeated, and never merge a user page away.\n\n\
+         pages:\n{pages}\n\
+         answer with json only:\n\
+         {{\"summaries\": [{{\"class\": \"project\", \"name\": \"short-lowercase-name\", \
+         \"body\": \"# title\\n\\nthe summary, in markdown\", \
+         \"replaces\": [\"project/old-name\"]}}]}}"
+    )
+}
+
+/// the model's answer, read the way the dream reads its own: the first
+/// json object in the text, the rest is chatter.
+pub fn parse_consolidation(text: &str) -> Result<Vec<Summary>, String> {
+    let t = text.trim();
+    let start = t.find('{').ok_or("the model answered nothing usable")?;
+    let end = t.rfind('}').ok_or("the model answered nothing usable")?;
+    let v: serde_json::Value =
+        serde_json::from_str(&t[start..=end]).map_err(|e| format!("bad json: {e}"))?;
+    let mut out = Vec::new();
+    for s in v["summaries"].as_array().into_iter().flatten() {
+        let (Some(class), Some(name), Some(body)) = (
+            s["class"].as_str().and_then(Class::parse),
+            s["name"].as_str(),
+            s["body"].as_str(),
+        ) else {
+            continue;
+        };
+        let replaces = s["replaces"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.as_str().map(String::from))
+            .collect();
+        out.push(Summary {
+            class,
+            name: name.to_string(),
+            body: body.to_string(),
+            replaces,
+        });
+    }
+    Ok(out)
+}
+
+/// writes each summary, then retires the pages it replaces. a replaced page
+/// keeps its last text in the history. user pages are never retired, and a
+/// page is never retired when it is the summary itself. returns the retired
+/// pages as `class/name`.
+pub fn apply_consolidation(m: &Memory, plan: &[Summary]) -> Result<Vec<String>, String> {
+    let mut retired = Vec::new();
+    for s in plan {
+        m.write(s.class, &s.name, &s.body)?;
+        for r in &s.replaces {
+            let Some((class_id, name)) = r.split_once('/') else {
+                continue;
+            };
+            let Some(class) = Class::parse(class_id) else {
+                continue;
+            };
+            if class == Class::User || (class == s.class && name == s.name) {
+                continue;
+            }
+            let Ok(path) = m.safe_path(class, name) else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            m.append_history(class, name, &today_iso(), &text);
+            m.forget(class, name)?;
+            retired.push(format!("{}/{}", class.id(), name));
+        }
+    }
+    Ok(retired)
+}
+
+/// asks the model for a plan, then applies it. `ask` is the model call, so the
+/// flow is testable without a network.
+pub fn consolidate(
+    m: &Memory,
+    ask: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<Vec<String>, String> {
+    let prompt = consolidation_prompt(m);
+    let answer = ask(&prompt)?;
+    let plan = parse_consolidation(&answer)?;
+    apply_consolidation(m, &plan)
 }
 
 #[cfg(test)]
@@ -996,6 +1192,112 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    fn days_ago(n: i64) -> String {
+        iso_from_days(days_now() - n)
+    }
+
+    #[test]
+    fn a_page_read_again_counts_its_use_and_restarts_its_age() {
+        let d = tmp("use");
+        let m = Memory::open(&d);
+        let dir = d.join(".nana/memory/project");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("old.md"),
+            "# old\n\nfact\n\n<!-- nana: updated 2001-01-01, confidence high -->\n",
+        )
+        .unwrap();
+        m.reinforce(Class::Project, "old").unwrap();
+        let e = m.list().into_iter().find(|e| e.name == "old").unwrap();
+        assert_eq!(e.uses, 1, "one use is counted");
+        assert_eq!(e.used.as_deref(), Some(today_iso().as_str()));
+        assert!(!e.forgotten(), "a page just used is kept");
+        assert_eq!(
+            e.updated.as_deref(),
+            Some("2001-01-01"),
+            "a use is not an edit"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_unused_page_fades_and_an_often_used_one_fades_slower() {
+        let d = tmp("fade");
+        let m = Memory::open(&d);
+        let dir = d.join(".nana/memory/project");
+        std::fs::create_dir_all(&dir).unwrap();
+        let day = days_ago(100);
+        std::fs::write(
+            dir.join("lazy.md"),
+            format!("# lazy\n\nx\n\n<!-- nana: updated {day}, confidence high, uses 0, used {day} -->\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("busy.md"),
+            format!("# busy\n\nx\n\n<!-- nana: updated {day}, confidence high, uses 10, used {day} -->\n"),
+        )
+        .unwrap();
+        let list = m.list();
+        let lazy = list.iter().find(|e| e.name == "lazy").unwrap();
+        let busy = list.iter().find(|e| e.name == "busy").unwrap();
+        assert!(
+            lazy.forgotten(),
+            "100 days unused, half-life 30 days: {}",
+            lazy.retention()
+        );
+        assert!(
+            !busy.forgotten(),
+            "ten uses stretch the half-life: {}",
+            busy.retention()
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_audit_lists_faded_pages_but_never_a_user_page() {
+        let d = tmp("audit-faded");
+        let m = Memory::open(&d);
+        let project = d.join(".nana/memory/project");
+        let user = d.join(".nana/memory/user");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        let day = days_ago(100);
+        let footer = format!("<!-- nana: updated {day}, confidence high, uses 0, used {day} -->");
+        std::fs::write(project.join("faded.md"), format!("# f\n\nx\n\n{footer}\n")).unwrap();
+        std::fs::write(user.join("tone.md"), format!("# t\n\nx\n\n{footer}\n")).unwrap();
+        let audit = m.audit();
+        assert_eq!(
+            audit.forgotten,
+            vec!["project/faded".to_string()],
+            "{audit:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn recall_counts_each_page_it_hands_over() {
+        let d = tmp("recall-use");
+        let m = Memory::open(&d);
+        m.write(Class::Project, "parser", "# parser\n\npratt loop")
+            .unwrap();
+        let _ = m.recall("the parser", 4000);
+        let e = m.list().into_iter().find(|e| e.name == "parser").unwrap();
+        assert_eq!(e.uses, 1, "the recalled page is used once");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rewriting_a_page_keeps_its_use_count() {
+        let d = tmp("keep-uses");
+        let m = Memory::open(&d);
+        m.write(Class::Project, "p", "# p\n\nfirst").unwrap();
+        m.reinforce(Class::Project, "p").unwrap();
+        m.write(Class::Project, "p", "# p\n\nsecond").unwrap();
+        let e = m.list().into_iter().find(|e| e.name == "p").unwrap();
+        assert_eq!(e.uses, 1, "an edit does not erase the use count");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn every_write_is_kept_in_the_history_with_its_day() {
         let d = tmp("hist");
@@ -1007,6 +1309,72 @@ mod tests {
         assert_eq!(h.len(), 2, "{h:?}");
         assert_eq!(h[0].0, today_iso(), "each entry is dated");
         assert!(m.history(Class::User, "other").len() == 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_model_answer_is_read_into_summaries() {
+        let text = "sure: {\"summaries\": [{\"class\": \"project\", \"name\": \"tooling\", \
+                    \"body\": \"# tooling\\n\\ncargo and fmt\", \
+                    \"replaces\": [\"project/a\", \"project/b\"]}]} thanks";
+        let plan = parse_consolidation(text).expect("a plan");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].class, Class::Project);
+        assert_eq!(plan[0].name, "tooling");
+        assert_eq!(plan[0].replaces, vec!["project/a", "project/b"]);
+        assert!(parse_consolidation("no json here").is_err());
+    }
+
+    #[test]
+    fn consolidation_keeps_the_summary_and_the_history_of_what_it_replaces() {
+        let d = tmp("consolidate");
+        let m = Memory::open(&d);
+        m.write(Class::Project, "a", "# a\n\nfirst fact").unwrap();
+        m.write(Class::Project, "b", "# b\n\nsecond fact").unwrap();
+        m.write(Class::User, "tone", "blunt").unwrap();
+        let plan = vec![Summary {
+            class: Class::Project,
+            name: "ab".into(),
+            body: "# ab\n\nboth facts".into(),
+            replaces: vec!["project/a".into(), "project/b".into(), "user/tone".into()],
+        }];
+        let removed = apply_consolidation(&m, &plan).unwrap();
+        assert_eq!(removed, vec!["project/a", "project/b"]);
+        let names: Vec<String> = m.list().into_iter().map(|e| e.name).collect();
+        assert!(names.contains(&"ab".to_string()));
+        assert!(!names.contains(&"a".to_string()));
+        assert!(
+            names.contains(&"tone".to_string()),
+            "a user page is never merged away"
+        );
+        let h = m.history(Class::Project, "a");
+        assert_eq!(h.len(), 2, "the write and the removal are both kept: {h:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn consolidate_asks_the_model_then_applies_its_plan() {
+        let d = tmp("consolidate-model");
+        let m = Memory::open(&d);
+        m.write(Class::Reference, "x", "# x\n\none").unwrap();
+        m.write(Class::Reference, "y", "# y\n\ntwo").unwrap();
+        let mut asked = String::new();
+        let removed = consolidate(&m, |prompt| {
+            asked = prompt.to_string();
+            Ok(
+                "{\"summaries\": [{\"class\": \"reference\", \"name\": \"xy\", \
+                \"body\": \"# xy\\n\\none and two\", \
+                \"replaces\": [\"reference/x\", \"reference/y\"]}]}"
+                    .to_string(),
+            )
+        })
+        .unwrap();
+        assert!(
+            asked.contains("reference/x") && asked.contains("two"),
+            "the model sees the pages"
+        );
+        assert_eq!(removed.len(), 2);
+        assert!(m.list().iter().any(|e| e.name == "xy"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

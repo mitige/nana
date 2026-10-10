@@ -8,7 +8,7 @@
 //!   nana --agent --resume "…"     continue the project's last conversation
 //!   nana --show-prompt "…"        print exactly what the model will receive
 //!   nana --providers              who can answer, and how they are picked
-//!   nana --memory …               list, search, read, write, forget
+//!   nana --memory …               list, search, read, write, forget, consolidate
 //!   nana --persona …              list, show, write, delete
 //!   nana --skills                 what this project can hand the agent
 //!   nana --languages              the language registry
@@ -523,6 +523,31 @@ fn memory_cmd(root: &Path, rest: &[String]) -> i32 {
             match mem.forget(class, name) {
                 Ok(()) => {
                     println!("forgotten");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("nana: {e}");
+                    1
+                }
+            }
+        }
+        Some("consolidate") => {
+            let settings = settings::Settings::load(root);
+            let mut runner = match agent::Agent::new(root, settings) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("nana: {e}");
+                    return 1;
+                }
+            };
+            eprintln!("consolidating the memory...");
+            match memory::consolidate(&mem, |prompt| runner.run(prompt, |_| {})) {
+                Ok(retired) if retired.is_empty() => {
+                    println!("nothing to consolidate");
+                    0
+                }
+                Ok(retired) => {
+                    println!("consolidated, retired {}", retired.join(", "));
                     0
                 }
                 Err(e) => {

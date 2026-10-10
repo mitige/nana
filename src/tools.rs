@@ -440,8 +440,8 @@ pub fn run(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> {
         }
         "memory_audit" => {
             let audit = ctx.memory.audit();
-            if audit.duplicates.is_empty() && audit.stale.is_empty() {
-                return Ok("memory audit: no duplicate and no stale page".into());
+            if audit.duplicates.is_empty() && audit.stale.is_empty() && audit.forgotten.is_empty() {
+                return Ok("memory audit: no duplicate, no stale and no forgotten page".into());
             }
             let mut lines = vec!["memory audit, nothing was changed:".to_string()];
             for (a, b) in &audit.duplicates {
@@ -450,12 +450,18 @@ pub fn run(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> {
             for s in &audit.stale {
                 lines.push(format!("stale: {s} is past its limit, check it"));
             }
+            for f in &audit.forgotten {
+                lines.push(format!("forgotten: {f} is no longer used, it fades"));
+            }
             Ok(lines.join("\n"))
         }
         "memory_read" => {
             let class = Class::parse(arg(args, "class")?)
                 .ok_or_else(|| "classes are user, feedback, project, reference".to_string())?;
-            ctx.memory.read(class, arg(args, "name")?)
+            let name = arg(args, "name")?;
+            let body = ctx.memory.read(class, name)?;
+            let _ = ctx.memory.reinforce(class, name);
+            Ok(body)
         }
         "memory_write" => {
             let class = Class::parse(arg(args, "class")?)
