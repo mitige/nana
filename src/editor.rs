@@ -2248,7 +2248,10 @@ impl Editor {
             self.toggle_search();
             return;
         }
-        if key.code == KeyCode::F(3) {
+        // super+t : le même terminal que F3, pour qui vient d'un bureau
+        if key.code == KeyCode::F(3)
+            || (key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::SUPER))
+        {
             self.toggle_terminal();
             return;
         }
@@ -4393,6 +4396,19 @@ mod pair_tests {
         assert_eq!(ed.focus, Focus::Editor, "…et retour");
         ed.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::empty()));
         assert!(ed.term.is_none());
+    }
+
+    /// super+t ouvre et ferme le terminal, comme F3 : c'est le raccourci
+    /// « terminal » que l'on tape sans réfléchir sur un bureau.
+    #[test]
+    fn super_t_ouvre_le_terminal() {
+        let mut ed = Editor::open(None).unwrap();
+        ed.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::SUPER));
+        assert!(ed.term.is_some(), "super+t spawne le PTY");
+        assert_eq!(ed.focus, Focus::Terminal);
+        ed.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        ed.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::SUPER));
+        assert!(ed.term.is_none(), "super+t referme");
     }
 
     /// Explorateur : ^N crée (et ouvre + en-tête), ^R renomme, ^D supprime

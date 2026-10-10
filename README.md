@@ -2,9 +2,13 @@
 
 an adaptive terminal editor. one buffer, every language.
 
-version 1.0.
+version 2.0.
 
 ![nana, the welcome screen](docs/shots/image.png)
+
+<!-- PLACEHOLDER: capture de l'accueil en 2.0 (hub ctrl+w) — à remplacer -->
+> **placeholder** — capture à faire : le hub (`ctrl+w`) seul à l'écran, bords arrondis.
+> chemin prévu : `docs/shots/hub-2.0.png`
 
 ## what it is
 
@@ -25,6 +29,9 @@ build systems and frameworks. the whole table lives in one file
 ([`src/langs.rs`](src/langs.rs)), so adding a language is adding a row.
 
 ## screenshots
+
+<!-- PLACEHOLDER: capture du terminal ouvert avec super+t -->
+> **placeholder** — capture à faire : `super+t` ouvre le terminal intégré. chemin : `docs/shots/terminal-super-t.png`
 
 ### c, in a project
 
@@ -79,7 +86,7 @@ nana src          # opens a directory
 | `ctrl+t` | file explorer |
 | `ctrl+o` | fuzzy file search |
 | `f2` | cycle panels |
-| `f3` | terminal |
+| `f3` / `super+t` | terminal (`super+t` needs a terminal that sends the super key, e.g. kitty, wezterm, foot, ghostty) |
 | `ctrl+b` | check the file (compiler, linter, parser) |
 | `f5` | run (project command, or the file itself) |
 | `f6` | format (prettier, rustfmt, gofmt, black…) |
@@ -169,6 +176,9 @@ csv, diff, dotenv, gitconfig.
 
 nana is also an agent. it reads your project, it can act on it, and it keeps
 what it learns — per project, on disk, in markdown you can read and edit.
+
+<!-- PLACEHOLDER: capture du hub (ctrl+w), boîtes arrondies, rien d'autre à l'écran -->
+> **placeholder** — capture à faire : `ctrl+w`, le hub seul. chemin : `docs/shots/hub-2.0.png`
 
 ### the panel
 
@@ -321,6 +331,7 @@ press. the **model name picks the endpoint**:
 
 | model name contains | provider |
 | --- | --- |
+| `cheapmodels/...` | cheapmodels (`OPPP_API_KEY`) |
 | `claude`, `sonnet`, `opus`, `haiku` | anthropic |
 | `gemini` | google |
 | `qwen`, `kimi`, `deepseek`, `glm` | alibaba dashscope |
@@ -425,9 +436,9 @@ you wrote is what frames the work.
 
 ### what is not there yet
 
-the second half of 2.0 is being built: dedicated panels for memory,
-providers, skills, mcp servers, plugins, agent teams, scheduled jobs and
-documents; an mcp client; plan mode. today those live on the command line.
+not in 2.0 yet: dedicated panels for mcp servers, plugins, agent teams,
+scheduled jobs and documents; an mcp client; plan mode. the hub, the company,
+memory, providers, skills and personas are in; the rest is on the roadmap.
 what exists is verified end to end — the test suite drives a real http server
 for the client, and a real tool loop for the agent.
 
@@ -457,7 +468,7 @@ final_newline = true
 ## development
 
 ```sh
-cargo test        # 205 tests, no network, no fixtures to download
+cargo test        # 207 tests, no network, no fixtures to download
 cargo run         # the editor, on this repository
 cargo run -- --languages
 ```

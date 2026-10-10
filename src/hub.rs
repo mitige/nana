@@ -317,7 +317,10 @@ impl Hub {
 
     fn provider_items(&self) -> Vec<Item> {
         let s = self.settings();
-        let current = s.model.clone().unwrap_or_else(|| "kimi-k3".into());
+        let current = s
+            .model
+            .clone()
+            .unwrap_or_else(|| crate::provider::DEFAULT_MODEL.into());
         crate::provider::PROVIDERS
             .iter()
             .map(|p| {
@@ -433,7 +436,7 @@ impl Hub {
                     let s = self.settings();
                     format!(
                         "current model: {}\nprovider: {}\nsandbox: {}\n\nset a model in .nana/settings.json:\n  {{\"model\": \"gpt-4o\", \"provider\": \"openai\"}}",
-                        s.model.clone().unwrap_or_else(|| "kimi-k3 (default)".into()),
+                        s.model.clone().unwrap_or_else(|| format!("{} (default)", crate::provider::DEFAULT_MODEL)),
                         s.provider
                             .clone()
                             .unwrap_or_else(|| "auto, from the model name".into()),

@@ -150,7 +150,7 @@ pub const DEFAULT_CONFIG: &str = r##"# nana configuration — every key is optio
 # author = "your name"
 
 # optional ghost completion (needs an openai-compatible key in the env):
-# ai_model = "kimi-k3"
+# ai_model = "cheapmodels/claude-opus-5.5"
 # ai_help_level = 1        # 1 socratic .. 5 full analysis
 # nana_agent = "the elder"
 

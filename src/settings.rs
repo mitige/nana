@@ -15,7 +15,7 @@ pub const PROJECT_DIR: &str = ".nana";
 pub struct Settings {
     /// provider id to use, when the model name is not enough
     pub provider: Option<String>,
-    /// model id, e.g. "kimi-k3", "claude-sonnet-4", "llama3.1"
+    /// model id, e.g. "cheapmodels/claude-opus-5.5", "claude-sonnet-4", "llama3.1"
     pub model: Option<String>,
     /// override the provider's endpoint
     pub base_url: Option<String>,

@@ -57,6 +57,10 @@ pub struct Provider {
     pub keyless: bool,
 }
 
+/// the model used when nothing says otherwise. it lives here, next to the
+/// registry, so the hub, the cli and the client can never disagree on it.
+pub const DEFAULT_MODEL: &str = "cheapmodels/claude-opus-5.5";
+
 /// every provider nana knows out of the box.
 pub const PROVIDERS: &[Provider] = &[
     Provider {
@@ -111,6 +115,15 @@ pub const PROVIDERS: &[Provider] = &[
         base_url: "https://api.agentic.press/v1",
         key_env: Some("AGENTIC_PRESS_API_KEY"),
         model_hints: &["agentic/"],
+        keyless: false,
+    },
+    Provider {
+        id: "cheapmodels",
+        label: "cheapmodels",
+        kind: Kind::OpenAi,
+        base_url: "https://cheapmodels.xyz/v1",
+        key_env: Some("OPPP_API_KEY"),
+        model_hints: &["cheapmodels/"],
         keyless: false,
     },
     Provider {
@@ -264,7 +277,7 @@ impl Client {
             .model
             .clone()
             .or_else(|| std::env::var("NANA_MODEL").ok())
-            .unwrap_or_else(|| "kimi-k3".to_string());
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
         let provider = settings
             .provider
             .as_deref()
@@ -753,7 +766,18 @@ mod tests {
     use std::net::TcpListener;
 
     #[test]
+    fn without_a_setting_the_default_model_is_cheapmodels_claude_opus() {
+        let s = Settings::default();
+        let root = std::env::temp_dir();
+        let c = Client::resolve(&s, &root).unwrap();
+        assert_eq!(c.model, "cheapmodels/claude-opus-5.5");
+        assert_eq!(c.provider.id, "cheapmodels");
+        assert_eq!(c.base_url, "https://cheapmodels.xyz/v1");
+    }
+
+    #[test]
     fn models_are_routed_to_their_provider() {
+        assert_eq!(detect("cheapmodels/claude-opus-5.5").id, "cheapmodels");
         assert_eq!(detect("claude-sonnet-4").id, "anthropic");
         assert_eq!(detect("gemini-2.5-pro").id, "gemini");
         assert_eq!(detect("qwen-max").id, "dashscope");

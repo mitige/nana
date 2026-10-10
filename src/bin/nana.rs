@@ -119,7 +119,7 @@ fn providers() {
     let model = s
         .model
         .clone()
-        .unwrap_or_else(|| "(none set — the default is kimi-k3, which wants dashscope)".into());
+        .unwrap_or_else(|| format!("(none set — the default is {})", provider::DEFAULT_MODEL));
     let picked = provider::detect(&model);
     println!("model:  {model}");
     println!("picked: {} [{}]", picked.label, picked.kind_name());

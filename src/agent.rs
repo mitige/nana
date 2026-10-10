@@ -568,7 +568,11 @@ mod tests {
             .run("keep going", |e| events.push(e))
             .expect("a long session must not be cut off");
         assert_eq!(answer, "all done");
-        assert_eq!(server.join().unwrap().len(), calls + 1, "every step was sent");
+        assert_eq!(
+            server.join().unwrap().len(),
+            calls + 1,
+            "every step was sent"
+        );
         assert!(events
             .iter()
             .any(|e| matches!(e, Event::Finished { steps } if *steps == calls + 1)));
