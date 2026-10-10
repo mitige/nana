@@ -1080,7 +1080,15 @@ mod tests {
             tmp,
         );
         assert_eq!(prog, "gcc");
-        assert_eq!(args, vec!["/home/me/main.c", "-o", "/tmp/x/bin"]);
+        let abs = std::path::absolute(Path::new("/home/me/main.c")).unwrap();
+        assert_eq!(
+            args,
+            vec![
+                abs.display().to_string(),
+                "-o".to_string(),
+                tmp.join("bin").display().to_string()
+            ]
+        );
         // a relative path is handed over absolute, so any cwd works
         let (_, rel) = expand(
             &Cmd {
@@ -1090,8 +1098,12 @@ mod tests {
             Path::new("src/main.c"),
             tmp,
         );
-        assert!(rel[0].starts_with('/'), "{}", rel[0]);
-        assert!(rel[0].ends_with("src/main.c"), "{}", rel[0]);
+        assert!(Path::new(&rel[0]).is_absolute(), "{}", rel[0]);
+        assert!(
+            Path::new(&rel[0]).ends_with(Path::new("src").join("main.c")),
+            "{}",
+            rel[0]
+        );
         assert_eq!(
             expand_arg("{stem}", Path::new("/a/b/hello.py"), tmp),
             "hello"

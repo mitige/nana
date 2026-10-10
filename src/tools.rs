@@ -597,7 +597,8 @@ mod tests {
         std::fs::write(d.join("target/b.rs"), "let needle = 2;\n").unwrap();
         let ctx = Ctx::new(&d, true);
         let hits = run("grep", &json!({"pattern": "needle"}), &ctx).unwrap();
-        assert!(hits.contains("src/a.rs:1"), "{hits}");
+        let found = std::path::Path::new("src").join("a.rs");
+        assert!(hits.contains(&format!("{}:1", found.display())), "{hits}");
         assert!(!hits.contains("target"), "build output is skipped: {hits}");
         let _ = std::fs::remove_dir_all(&d);
     }

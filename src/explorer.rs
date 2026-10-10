@@ -572,7 +572,13 @@ mod tests {
             ex.push_filter(c);
         }
         let names: Vec<&str> = ex.rows().iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["src/util.c"], "chemin relatif affiché");
+        let shown = std::path::Path::new(names[0]);
+        assert_eq!(names.len(), 1, "one match for util: {names:?}");
+        assert_eq!(
+            shown,
+            std::path::Path::new("src").join("util.c"),
+            "chemin relatif affiché"
+        );
         assert!(ex.clear_filter());
         assert_eq!(ex.rows().len(), 2, "retour à l'arbre");
         let _ = fs::remove_dir_all(root);

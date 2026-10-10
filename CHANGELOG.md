@@ -1,5 +1,9 @@
 # changelog
 
+## 2.2.1
+
+- the test suite runs on windows: paths are built with the platform separator.
+
 ## 2.2.0
 
 - one-line installs: `install.sh` for linux, `install.ps1` for windows. both
