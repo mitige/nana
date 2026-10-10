@@ -732,6 +732,8 @@ pub struct Editor {
     /// when the transient line was last written, and what it said
     status_at: Instant,
     status_seen: String,
+    /// the user's typing rhythm: when the quiet is long enough, the memory is looked at
+    quiet: crate::quiet::Quiet,
     check_marks: Vec<(usize, Severity)>,
     check_rx: Option<Receiver<crate::check::Report>>,
     /// diagnostics gcc du dernier build (^B) + navigation ^N/^P
@@ -901,6 +903,7 @@ impl Editor {
             epoch: Instant::now(),
             status_at: Instant::now(),
             status_seen: status_seen.clone(),
+            quiet: crate::quiet::Quiet::default(),
             check_marks: Vec::new(),
             check_rx: None,
             diags: Vec::new(),
@@ -1910,6 +1913,28 @@ impl Editor {
         self.status = "header in progress…".into();
     }
 
+    /// once the user has left a quiet moment, the project memory is audited
+    /// (read only) and the verdict goes to the status line. nothing is written.
+    fn poll_quiet(&mut self, now: Instant) {
+        if self.agent_pane.is_some() || !self.quiet.due(now) {
+            return;
+        }
+        let Some(root) =
+            crate::project::detect(self.file.as_deref().unwrap_or(Path::new("."))).map(|p| p.root)
+        else {
+            return;
+        };
+        let a = crate::memory::Memory::open(&root).audit();
+        if a.duplicates.is_empty() && a.stale.is_empty() {
+            return;
+        }
+        self.status = format!(
+            "memory: {} duplicate(s), {} stale page(s) — ask the agent to review them",
+            a.duplicates.len(),
+            a.stale.len()
+        );
+    }
+
     fn poll_header(&mut self) {
         let Some(rx) = &self.header_rx else {
             return;
@@ -2540,6 +2565,7 @@ impl Editor {
     // -------------------------------------------------------------- boucle
 
     fn on_key(&mut self, key: KeyEvent) {
+        self.quiet.key(Instant::now());
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
 
@@ -4816,6 +4842,7 @@ fn loop_run(terminal: &mut ratatui::DefaultTerminal, ed: &mut Editor) -> io::Res
         ed.poll_check();
         ed.poll_diag();
         ed.poll_header();
+        ed.poll_quiet(Instant::now());
         if let Some(term) = &mut ed.term {
             term.poll();
         }
@@ -5651,6 +5678,41 @@ mod hub_ui_tests {
         let mut ed = Editor::open(None).unwrap();
         ed.explorer = Some(Explorer::new(root.to_path_buf()));
         ed
+    }
+
+    #[test]
+    fn a_quiet_moment_after_typing_audits_the_memory_and_says_so() {
+        let d = seeded();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+        let m = crate::memory::Memory::open(&d);
+        m.write(
+            crate::memory::Class::Project,
+            "twin-a",
+            "# a\n\nthe same words here",
+        )
+        .unwrap();
+        m.write(
+            crate::memory::Class::Project,
+            "twin-b",
+            "# b\n\nthe same words here",
+        )
+        .unwrap();
+        let mut ed = editor_at(&d);
+        ed.file = Some(d.join("main.rs"));
+        let t0 = Instant::now();
+        for i in 0..5 {
+            ed.quiet.key(t0 + Duration::from_millis(200 * i));
+        }
+        let quiet_end = t0 + Duration::from_millis(800) + ed.quiet.threshold();
+        ed.poll_quiet(t0 + Duration::from_millis(100));
+        assert!(!ed.status.contains("duplicate"), "no look during typing");
+        ed.poll_quiet(quiet_end);
+        assert!(
+            ed.status.contains("1 duplicate"),
+            "the look is said on the status line: {}",
+            ed.status
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

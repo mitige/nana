@@ -132,6 +132,38 @@ impl Agent {
         Some(path)
     }
 
+    /// runs the check of each page the request touches, before the model
+    /// answers, so a false page is seen at once. it goes through memory_check,
+    /// so a destructive check meets the same approval gate as any shell call.
+    fn touched_checks(&self, request: &str) -> String {
+        let req = request.to_lowercase();
+        let mut lines = Vec::new();
+        for e in self.ctx.memory.list() {
+            if e.check.is_none() {
+                continue;
+            }
+            if e.class == crate::memory::Class::User {
+                continue;
+            }
+            let name = e.name.to_lowercase();
+            let mentioned = req.contains(&name)
+                || req
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|w| w.len() > 3 && name.split('-').any(|p| p == w));
+            if !mentioned {
+                continue;
+            }
+            let args = serde_json::json!({"class": e.class.id(), "name": e.name});
+            if let Ok(verdict) = crate::tools::run("memory_check", &args, &self.ctx) {
+                lines.push(verdict);
+            }
+        }
+        if lines.is_empty() {
+            return String::new();
+        }
+        format!("checks run for you:\n{}\n", lines.join("\n"))
+    }
+
     /// the ordered sections of the system prompt.
     pub fn sections(&self, request: &str) -> Vec<Section> {
         let mut out: Vec<Section> = Vec::new();
@@ -179,10 +211,11 @@ impl Agent {
             "the memory of this project is empty so far.\n".to_string()
         } else {
             let recalled = self.ctx.memory.recall(request, RECALL_BUDGET);
+            let checks = self.touched_checks(request);
             if recalled.is_empty() {
                 mem
             } else {
-                format!("{mem}the pages this request touches, read for you:\n{recalled}")
+                format!("{mem}the pages this request touches, read for you:\n{recalled}{checks}")
             }
         };
         out.push(Section {
@@ -615,6 +648,45 @@ mod tests {
         assert!(
             p.contains("pratt loop"),
             "the page body is in the prompt: {p}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_checks_of_the_pages_a_request_touches_run_before_the_answer() {
+        let d = tmp("auto-check");
+        std::fs::write(d.join("Cargo.toml"), "[package]\n").unwrap();
+        let m = crate::memory::Memory::open(&d);
+        m.write_checked(
+            crate::memory::Class::Project,
+            "manifest",
+            "# manifest\n\na cargo manifest exists",
+            crate::memory::Confidence::Medium,
+            Some("test -f Cargo.toml"),
+        )
+        .unwrap();
+        m.write_checked(
+            crate::memory::Class::Project,
+            "parser",
+            "# parser\n\nthe parser lives in one file",
+            crate::memory::Confidence::Medium,
+            Some("test -f missing-parser.rs"),
+        )
+        .unwrap();
+        let a = Agent::with_client(
+            &d,
+            Settings::default(),
+            Client::local("http://127.0.0.1:1", "m"),
+        );
+        let p = a.system_prompt("refactor the parser and the manifest");
+        assert!(p.contains("checks run for you"), "no check report: {p}");
+        assert!(
+            p.contains("holds: manifest"),
+            "a true page is not reported: {p}"
+        );
+        assert!(
+            p.contains("does not hold: parser"),
+            "a false page is not reported: {p}"
         );
         let _ = std::fs::remove_dir_all(&d);
     }

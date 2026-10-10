@@ -27,6 +27,7 @@ pub mod memory;
 pub mod persona;
 pub mod project;
 pub mod provider;
+pub mod quiet;
 pub mod run;
 pub mod settings;
 pub mod skills;
