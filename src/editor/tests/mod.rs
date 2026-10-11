@@ -58,6 +58,7 @@ mod hub_truncation;
 mod hub_ui;
 mod human_inference;
 mod layout;
+mod live_pace;
 mod live_sync;
 mod live_write;
 mod pair;

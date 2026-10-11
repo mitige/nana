@@ -313,6 +313,8 @@ pub struct Editor {
     /// writes the agent announced, played back one line per step; the first is
     /// the one on screen
     live: Vec<LiveWrite>,
+    /// when the last letter of the playback was put on screen
+    live_stepped: Option<Instant>,
     /// the agent's own view of the file it writes or reads: a buffer and a
     /// cursor of its own, drawn behind the card, never in the user's buffer
     agent_view: AgentView,
@@ -481,6 +483,7 @@ impl Editor {
             ai: None,
             agent_pane: None,
             live: Vec::new(),
+            live_stepped: None,
             agent_view: AgentView::default(),
             hub: None,
             explorer: None,

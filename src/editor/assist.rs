@@ -83,6 +83,21 @@ impl Editor {
     }
 
     /// Plays the next queued agent write into the agent's own view, without touching the user's buffer, file or cursor.
+    /// Tells whether a playback step is due at `now`: one step per TICK of wall
+    /// time, so a loop that wakes on every key does not speed the write up.
+    /// Hands back true and records `now` when the step may run.
+    pub(super) fn live_step_due(&mut self, now: Instant) -> bool {
+        let due = match self.live_stepped {
+            None => true,
+            Some(at) => now.duration_since(at) >= TICK,
+        };
+        if due {
+            self.live_stepped = Some(now);
+        }
+        due
+    }
+
+    /// Plays the next queued agent write into the agent's own view, without touching the user's buffer, file or cursor.
     pub(super) fn play_live(&mut self) {
         let Some(w) = self.live.first_mut() else {
             return;

@@ -1,5 +1,9 @@
 # changelog
 
+## 2.2.9
+
+- the agent's playback (writes, reads, actions) advances by wall-clock time, one step per 16 ms tick. before, every wake-up of the loop (a key, a mouse move) played a step, so the write jumped ahead in bursts.
+
 ## 2.2.8
 
 - the playback no longer shortens a write because the agent wrote a lot: a single long write plays at its own pace. the queue is still bounded (at most 24 waiting writes).
