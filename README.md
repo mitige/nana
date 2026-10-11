@@ -182,9 +182,33 @@ what it learns — per project, on disk, in markdown you can read and edit.
 
 ### the panel
 
-`ctrl+a` opens the agent. the menu takes the whole screen, like the hub: nothing
-of the ide is drawn behind it. type your request, `enter` sends it, `esc`
-closes the menu — and `esc` again while it is thinking cancels the request.
+`ctrl+a` opens the agent. the card floats over the ide, which stays visible behind
+it, so you see the code the agent is working on as you would see it yourself.
+type your request, `enter` sends it, `esc` closes the card — and `esc` again
+while it is thinking cancels the request.
+
+### human inference
+
+the live view is built so that every action of the agent is shown the way you
+would do it yourself in an ide, not as a log of tool calls:
+
+- a file the agent writes or reads opens in the view, as the file itself, with
+  its syntax colours. the text is typed letter by letter and the cursor moves to
+  the line being written, the way your own hand would.
+- a shell command appears as a terminal session: `$ ls src` is typed, then its
+  output follows. the agent never looks like it is running a hidden process.
+- a listing, a memory page or a search shows up as the same kind of action, in
+  one shared view, so one action does not replace the one before it before you
+  can read it.
+- actions are played in the order the agent made them. when the agent gets
+  ahead of the screen, the playback speeds up so it never trails by more than
+  about a second and a half; nothing is skipped and every write lands in full.
+- when you open another file or close the card, the playback stops and your own
+  file is shown. nothing the agent does moves your buffer behind your back.
+
+the rule is the same everywhere: what the agent does must be readable by a
+human looking at the screen, with nothing hidden and nothing that would not
+happen in a normal editor.
 
 ![the agent](docs/shots/test3.png)
 
@@ -481,7 +505,7 @@ final_newline = true
 ## development
 
 ```sh
-cargo test        # 316 tests, no network, no fixtures to download
+cargo test        # 324 tests, no network, no fixtures to download
 cargo run         # the editor, on this repository
 cargo run -- --languages
 ```

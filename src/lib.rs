@@ -18,6 +18,7 @@ pub mod config;
 pub mod diag;
 pub mod editor;
 pub mod explorer;
+pub mod guard;
 pub mod header;
 pub mod highlight;
 pub mod hub;

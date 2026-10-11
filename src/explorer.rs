@@ -156,6 +156,28 @@ impl Explorer {
         self.refresh();
     }
 
+    /// the tree follows a file the agent works on: its parent folders open,
+    /// and the cursor lands on it, as it would if the user had gone there.
+    pub fn select_path(&mut self, path: &Path) {
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        };
+        let path = path.as_path();
+        let mut dir = path.parent();
+        while let Some(d) = dir {
+            if d.starts_with(&self.root) {
+                self.expanded.insert(d.to_path_buf());
+            }
+            dir = d.parent().filter(|p| p.starts_with(&self.root));
+        }
+        self.refresh();
+        if let Some(i) = self.rows.iter().position(|r| r.path == path) {
+            self.sel = i;
+        }
+    }
+
     /// Reconstruit les lignes visibles (après pliage, filtre, rafraîchissement).
     fn refresh(&mut self) {
         let keep = self.rows.get(self.sel).map(|r| r.path.clone());
