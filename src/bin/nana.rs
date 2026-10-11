@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Entry point of the binary: reads the arguments and dispatches to a subcommand, or opens the editor when there is none, and exits with the code it returns.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -67,6 +68,7 @@ fn main() {
     std::process::exit(code);
 }
 
+/// Prints the command-line help, the one place the list of subcommands is written for the user.
 fn help() {
     print!(
         "nana {VERSION} — an adaptive terminal editor, now with an agent
@@ -113,6 +115,7 @@ the agent
     );
 }
 
+/// Prints the model in use and the provider it resolves to, then one row per provider with its key state, so the user sees what will answer.
 fn providers() {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let s = settings::Settings::load(&root);
@@ -154,6 +157,7 @@ fn providers() {
     );
 }
 
+/// Prints the skills this project offers, or says where to add one when there are none.
 fn print_skills(root: &Path) {
     let s = settings::Settings::load(root);
     let found = skills::discover(root, &s.skill_dirs);
@@ -318,117 +322,15 @@ fn today() -> String {
 }
 
 /// the company: a ceo that hires, employees that work.
+/// Runs `nana --company <sub>`: the staff of the project, their mailbox and the
+/// hiring, dispatch and firing of employees. Hands back the process exit code.
 fn company_cmd(root: &Path, rest: &[String]) -> i32 {
-    use nana::company;
     match rest.first().map(String::as_str) {
-        None | Some("list") => {
-            print!("{}", company::describe(root));
-            let mail = company::mailbox(root);
-            if !mail.is_empty() {
-                println!("\nmailbox:");
-                for t in mail.iter().rev().take(8) {
-                    println!("  {:<8} {:<10} {}", t.employee, t.state, short(&t.task, 60));
-                }
-            }
-            0
-        }
-        Some("hire") => {
-            let mission = rest[1..].join(" ");
-            if mission.trim().is_empty() {
-                eprintln!("usage: nana --company hire \"the mission\"");
-                return 2;
-            }
-            let settings = settings::Settings::load(root);
-            let mut runner = match agent::Agent::new(root, settings) {
-                Ok(a) => a,
-                Err(e) => {
-                    eprintln!("nana: {e}");
-                    return 1;
-                }
-            };
-            let project = settings::Settings::load(root);
-            let known = skills::discover(root, &project.skill_dirs)
-                .into_iter()
-                .map(|s| s.name)
-                .collect::<Vec<_>>();
-            eprintln!("the ceo is thinking about: {mission}");
-            match company::plan_hiring(&mut runner, &mission, &known) {
-                Ok(people) => match company::hire(root, &people) {
-                    Ok(n) => {
-                        println!("hired {n}:");
-                        for p in &people {
-                            println!("  {:<12} {:<22} {}", p.name, p.role, p.mission);
-                        }
-                        0
-                    }
-                    Err(e) => {
-                        eprintln!("nana: {e}");
-                        1
-                    }
-                },
-                Err(e) => {
-                    eprintln!("nana: {e}");
-                    1
-                }
-            }
-        }
-        Some("task") => {
-            let (Some(name), true) = (rest.get(1), rest.len() > 2) else {
-                eprintln!("usage: nana --company task <name> \"the task\"");
-                return 2;
-            };
-            let task = rest[2..].join(" ");
-            let Some(employee) = company::employee(root, name) else {
-                eprintln!("nana: nobody named « {name} » works here");
-                return 1;
-            };
-            let settings = settings::Settings::load(root);
-            eprintln!("{} is on it", employee.name);
-            let result = company::dispatch(root, settings, &employee, &task, |e| match e {
-                agent::Event::ToolCall { name, args } => {
-                    eprintln!("→ {name} {}", short(&args.to_string(), 100))
-                }
-                agent::Event::ToolResult { name, ok, text } => {
-                    eprintln!(
-                        "{} {name} {}",
-                        if ok { "ok" } else { "no" },
-                        short(text.trim(), 120)
-                    )
-                }
-                agent::Event::Text(t) => println!("{t}"),
-                agent::Event::Error(e) => eprintln!("nana: {e}"),
-                _ => {}
-            });
-            match result {
-                Ok(_) => 0,
-                Err(_) => 1,
-            }
-        }
-        Some("fire") => {
-            let Some(name) = rest.get(1) else {
-                eprintln!("usage: nana --company fire <name>");
-                return 2;
-            };
-            match company::fire(root, name) {
-                Ok(()) => {
-                    println!("{name} was let go");
-                    0
-                }
-                Err(e) => {
-                    eprintln!("nana: {e}");
-                    1
-                }
-            }
-        }
-        Some("mail") => {
-            for t in company::mailbox(root) {
-                println!("{:<8} {:<8} {}", t.employee, t.state, short(&t.task, 70));
-                if !t.result.is_empty() {
-                    println!("         {}", short(&t.result, 90));
-                }
-            }
-            0
-        }
+        None | Some("list") => company_list(root),
+        Some("hire") => company_hire(root, rest),
+        Some("task") => company_task(root, rest),
+        Some("fire") => company_fire(root, rest),
+        Some("mail") => company_mail(root),
         Some(other) => {
             eprintln!("nana: unknown company command {other}");
             2
@@ -436,126 +338,146 @@ fn company_cmd(root: &Path, rest: &[String]) -> i32 {
     }
 }
 
+/// Prints the staff and the last eight mailbox entries. Hands back 0.
+fn company_list(root: &Path) -> i32 {
+    use nana::company;
+    print!("{}", company::describe(root));
+    let mail = company::mailbox(root);
+    if !mail.is_empty() {
+        println!("\nmailbox:");
+        for t in mail.iter().rev().take(8) {
+            println!("  {:<8} {:<10} {}", t.employee, t.state, short(&t.task, 60));
+        }
+    }
+    0
+}
+
+/// Plans and records new hires for a mission given after `hire`. Hands back
+/// the exit code: 2 for a missing mission, 1 when planning or saving fails.
+fn company_hire(root: &Path, rest: &[String]) -> i32 {
+    use nana::company;
+    let mission = rest[1..].join(" ");
+    if mission.trim().is_empty() {
+        eprintln!("usage: nana --company hire \"the mission\"");
+        return 2;
+    }
+    let settings = settings::Settings::load(root);
+    let mut runner = match agent::Agent::new(root, settings) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("nana: {e}");
+            return 1;
+        }
+    };
+    let project = settings::Settings::load(root);
+    let known = skills::discover(root, &project.skill_dirs)
+        .into_iter()
+        .map(|s| s.name)
+        .collect::<Vec<_>>();
+    eprintln!("the ceo is thinking about: {mission}");
+    match company::plan_hiring(&mut runner, &mission, &known) {
+        Ok(people) => match company::hire(root, &people) {
+            Ok(n) => {
+                println!("hired {n}:");
+                for p in &people {
+                    println!("  {:<12} {:<22} {}", p.name, p.role, p.mission);
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("nana: {e}");
+                1
+            }
+        },
+        Err(e) => {
+            eprintln!("nana: {e}");
+            1
+        }
+    }
+}
+
+/// Gives a task to a named employee and streams the run: tool calls and results
+/// go to stderr, the answer to stdout. Hands back 2 for bad usage, 1 on failure.
+fn company_task(root: &Path, rest: &[String]) -> i32 {
+    use nana::company;
+    let (Some(name), true) = (rest.get(1), rest.len() > 2) else {
+        eprintln!("usage: nana --company task <name> \"the task\"");
+        return 2;
+    };
+    let task = rest[2..].join(" ");
+    let Some(employee) = company::employee(root, name) else {
+        eprintln!("nana: nobody named « {name} » works here");
+        return 1;
+    };
+    let settings = settings::Settings::load(root);
+    eprintln!("{} is on it", employee.name);
+    let result = company::dispatch(root, settings, &employee, &task, print_company_event);
+    match result {
+        Ok(_) => 0,
+        Err(_) => 1,
+    }
+}
+
+/// Shows one event of an employee's run: calls and results on stderr, the
+/// text on stdout, errors on stderr. Other events are not shown.
+fn print_company_event(e: agent::Event) {
+    match e {
+        agent::Event::ToolCall { name, args } => {
+            eprintln!("→ {name} {}", short(&args.to_string(), 100))
+        }
+        agent::Event::ToolResult { name, ok, text } => eprintln!(
+            "{} {name} {}",
+            if ok { "ok" } else { "no" },
+            short(text.trim(), 120)
+        ),
+        agent::Event::Text(t) => println!("{t}"),
+        agent::Event::Error(e) => eprintln!("nana: {e}"),
+        _ => {}
+    }
+}
+
+/// Lets an employee go by name. Hands back 2 without a name, 1 when it fails.
+fn company_fire(root: &Path, rest: &[String]) -> i32 {
+    use nana::company;
+    let Some(name) = rest.get(1) else {
+        eprintln!("usage: nana --company fire <name>");
+        return 2;
+    };
+    match company::fire(root, name) {
+        Ok(()) => {
+            println!("{name} was let go");
+            0
+        }
+        Err(e) => {
+            eprintln!("nana: {e}");
+            1
+        }
+    }
+}
+
+/// Prints every mailbox entry with its result line when it has one. Hands back 0.
+fn company_mail(root: &Path) -> i32 {
+    use nana::company;
+    for t in company::mailbox(root) {
+        println!("{:<8} {:<8} {}", t.employee, t.state, short(&t.task, 70));
+        if !t.result.is_empty() {
+            println!("         {}", short(&t.result, 90));
+        }
+    }
+    0
+}
+
+/// Runs `nana --memory <sub>`: list, search, show, write and forget the pages of
+/// this project's memory. Hands back the process exit code.
 fn memory_cmd(root: &Path, rest: &[String]) -> i32 {
     let mem = memory::Memory::open(root);
     match rest.first().map(String::as_str) {
-        None | Some("list") => {
-            let entries = mem.list();
-            if entries.is_empty() {
-                println!("this project has no memory yet ({})", mem.root().display());
-                return 0;
-            }
-            for e in entries {
-                println!("{:<10} {:<24} {}", e.class.id(), e.name, e.title);
-            }
-            0
-        }
-        Some("search") => {
-            let Some(q) = rest.get(1) else {
-                eprintln!("usage: nana --memory search <text>");
-                return 2;
-            };
-            let hits = mem.search(q);
-            for h in &hits {
-                println!("{}:{}: {}", h.class.id(), h.line, h.text);
-            }
-            if hits.is_empty() {
-                println!("no match in this project's memory");
-            }
-            0
-        }
-        Some("show") | Some("read") => {
-            let (Some(class), Some(name)) = (rest.get(1), rest.get(2)) else {
-                eprintln!("usage: nana --memory show <class> <name>");
-                return 2;
-            };
-            let Some(class) = memory::Class::parse(class) else {
-                eprintln!("classes are user, feedback, project, reference");
-                return 2;
-            };
-            match mem.read(class, name) {
-                Ok(text) => {
-                    print!("{text}");
-                    0
-                }
-                Err(e) => {
-                    eprintln!("nana: {e}");
-                    1
-                }
-            }
-        }
-        Some("write") => {
-            // the text comes on stdin, so a page can be long and multi-line
-            let (Some(class), Some(name)) = (rest.get(1), rest.get(2)) else {
-                eprintln!("usage: nana --memory write <class> <name> <<'EOF' … EOF");
-                return 2;
-            };
-            let Some(class) = memory::Class::parse(class) else {
-                eprintln!("classes are user, feedback, project, reference");
-                return 2;
-            };
-            let mut body = String::new();
-            use std::io::Read;
-            if std::io::stdin().read_to_string(&mut body).is_err() || body.trim().is_empty() {
-                eprintln!("nana: nothing on stdin — pipe the page in");
-                return 2;
-            }
-            match mem.write(class, name, &body) {
-                Ok(path) => {
-                    println!("wrote {}", path.display());
-                    0
-                }
-                Err(e) => {
-                    eprintln!("nana: {e}");
-                    1
-                }
-            }
-        }
-        Some("forget") => {
-            let (Some(class), Some(name)) = (rest.get(1), rest.get(2)) else {
-                eprintln!("usage: nana --memory forget <class> <name>");
-                return 2;
-            };
-            let Some(class) = memory::Class::parse(class) else {
-                eprintln!("classes are user, feedback, project, reference");
-                return 2;
-            };
-            match mem.forget(class, name) {
-                Ok(()) => {
-                    println!("forgotten");
-                    0
-                }
-                Err(e) => {
-                    eprintln!("nana: {e}");
-                    1
-                }
-            }
-        }
-        Some("consolidate") => {
-            let settings = settings::Settings::load(root);
-            let mut runner = match agent::Agent::new(root, settings) {
-                Ok(a) => a,
-                Err(e) => {
-                    eprintln!("nana: {e}");
-                    return 1;
-                }
-            };
-            eprintln!("consolidating the memory...");
-            match memory::consolidate(&mem, |prompt| runner.run(prompt, |_| {})) {
-                Ok(retired) if retired.is_empty() => {
-                    println!("nothing to consolidate");
-                    0
-                }
-                Ok(retired) => {
-                    println!("consolidated, retired {}", retired.join(", "));
-                    0
-                }
-                Err(e) => {
-                    eprintln!("nana: {e}");
-                    1
-                }
-            }
-        }
+        None | Some("list") => memory_list(&mem),
+        Some("search") => memory_search(&mem, rest),
+        Some("show") | Some("read") => memory_show(&mem, rest),
+        Some("write") => memory_write(&mem, rest),
+        Some("forget") => memory_forget(&mem, rest),
+        Some("consolidate") => memory_consolidate(&mem, root),
         Some(other) => {
             eprintln!("nana: unknown memory command {other}");
             2
@@ -563,6 +485,143 @@ fn memory_cmd(root: &Path, rest: &[String]) -> i32 {
     }
 }
 
+/// Lists the pages of the project's memory, or says it has none. Hands back 0.
+fn memory_list(mem: &memory::Memory) -> i32 {
+    let entries = mem.list();
+    if entries.is_empty() {
+        println!("this project has no memory yet ({})", mem.root().display());
+        return 0;
+    }
+    for e in entries {
+        println!("{:<10} {:<24} {}", e.class.id(), e.name, e.title);
+    }
+    0
+}
+
+/// Searches the memory for the text after `search`, printing each hit as
+/// class:line. Hands back 2 without a query, 0 otherwise.
+fn memory_search(mem: &memory::Memory, rest: &[String]) -> i32 {
+    let Some(q) = rest.get(1) else {
+        eprintln!("usage: nana --memory search <text>");
+        return 2;
+    };
+    let hits = mem.search(q);
+    for h in &hits {
+        println!("{}:{}: {}", h.class.id(), h.line, h.text);
+    }
+    if hits.is_empty() {
+        println!("no match in this project's memory");
+    }
+    0
+}
+
+/// Merges the memory pages into fewer, sharper ones with the agent, and says
+/// which pages were retired. Hands back 1 when the agent or the merge fails.
+fn memory_consolidate(mem: &memory::Memory, root: &Path) -> i32 {
+    let settings = settings::Settings::load(root);
+    let mut runner = match agent::Agent::new(root, settings) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("nana: {e}");
+            return 1;
+        }
+    };
+    eprintln!("consolidating the memory...");
+    match memory::consolidate(mem, |prompt| runner.run(prompt, |_| {})) {
+        Ok(retired) if retired.is_empty() => {
+            println!("nothing to consolidate");
+            0
+        }
+        Ok(retired) => {
+            println!("consolidated, retired {}", retired.join(", "));
+            0
+        }
+        Err(e) => {
+            eprintln!("nana: {e}");
+            1
+        }
+    }
+}
+
+/// Parses `<class> <name>` from the arguments after a sub-command. Hands back
+/// the class and name, or the usage error message and exit code 2.
+fn class_and_name<'a>(rest: &'a [String], usage: &str) -> Result<(memory::Class, &'a str), i32> {
+    let (Some(class), Some(name)) = (rest.get(1), rest.get(2)) else {
+        eprintln!("{usage}");
+        return Err(2);
+    };
+    let Some(class) = memory::Class::parse(class) else {
+        eprintln!("classes are user, feedback, project, reference");
+        return Err(2);
+    };
+    Ok((class, name))
+}
+
+/// Prints one memory page. Hands back 2 for bad usage, 1 when the page is missing.
+fn memory_show(mem: &memory::Memory, rest: &[String]) -> i32 {
+    let (class, name) = match class_and_name(rest, "usage: nana --memory show <class> <name>") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    match mem.read(class, name) {
+        Ok(text) => {
+            print!("{text}");
+            0
+        }
+        Err(e) => {
+            eprintln!("nana: {e}");
+            1
+        }
+    }
+}
+
+/// Writes a memory page whose text comes on stdin, so a page can be long and
+/// multi-line. Hands back 2 for bad usage or empty input, 1 when saving fails.
+fn memory_write(mem: &memory::Memory, rest: &[String]) -> i32 {
+    use std::io::Read;
+    let (class, name) = match class_and_name(
+        rest,
+        "usage: nana --memory write <class> <name> <<'EOF' … EOF",
+    ) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let mut body = String::new();
+    if std::io::stdin().read_to_string(&mut body).is_err() || body.trim().is_empty() {
+        eprintln!("nana: nothing on stdin — pipe the page in");
+        return 2;
+    }
+    match mem.write(class, name, &body) {
+        Ok(path) => {
+            println!("wrote {}", path.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("nana: {e}");
+            1
+        }
+    }
+}
+
+/// Deletes one memory page. Hands back 2 for bad usage, 1 when the page cannot go.
+fn memory_forget(mem: &memory::Memory, rest: &[String]) -> i32 {
+    let (class, name) = match class_and_name(rest, "usage: nana --memory forget <class> <name>") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    match mem.forget(class, name) {
+        Ok(()) => {
+            println!("forgotten");
+            0
+        }
+        Err(e) => {
+            eprintln!("nana: {e}");
+            1
+        }
+    }
+}
+
+/// Handles the persona subcommand: lists the saved personas, or says how to add one when there are none, and returns the exit code.
 fn persona_cmd(root: &Path, rest: &[String]) -> i32 {
     match rest.first().map(String::as_str) {
         None | Some("list") => {
@@ -656,6 +715,7 @@ fn persona_cmd(root: &Path, rest: &[String]) -> i32 {
     }
 }
 
+/// Prints the system prompt the agent would send for a request, falling back to the same prompt when no client is usable, so it can be checked offline.
 fn show_prompt(root: &Path, rest: &[String]) -> i32 {
     let request = rest.join(" ");
     let s = settings::Settings::load(root);
@@ -678,6 +738,7 @@ fn show_prompt(root: &Path, rest: &[String]) -> i32 {
     }
 }
 
+/// Runs the agent on one request given on the command line, with the quiet and resume flags read out of the arguments, and returns its exit code.
 fn run_agent(root: &Path, rest: &[String]) -> i32 {
     let resume = rest.iter().any(|a| a == "--resume");
     let quiet = rest.iter().any(|a| a == "--quiet");
@@ -754,6 +815,7 @@ fn run_agent(root: &Path, rest: &[String]) -> i32 {
     }
 }
 
+/// Cuts a text to at most n characters after joining its lines, adding dots when it was cut, so a long message fits one line.
 fn short(s: &str, n: usize) -> String {
     let flat = s.replace('\n', " ");
     if flat.chars().count() <= n {

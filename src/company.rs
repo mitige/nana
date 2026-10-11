@@ -39,14 +39,17 @@ pub struct Task {
     pub result: String,
 }
 
+/// the folder where the project keeps its employees and their mail.
 fn dir(root: &Path) -> PathBuf {
     root.join(".nana").join("agents")
 }
 
+/// the roster file inside the company folder.
 fn roster_path(root: &Path) -> PathBuf {
     dir(root).join("roster.json")
 }
 
+/// the task mail file inside the company folder.
 fn mail_path(root: &Path) -> PathBuf {
     dir(root).join("tasks.jsonl")
 }
@@ -85,6 +88,7 @@ pub fn hire(root: &Path, people: &[Employee]) -> Result<usize, String> {
     Ok(hired)
 }
 
+/// removes an employee from the roster; errors when nobody has that name.
 pub fn fire(root: &Path, name: &str) -> Result<(), String> {
     let mut all = roster(root);
     let before = all.len();
@@ -95,6 +99,7 @@ pub fn fire(root: &Path, name: &str) -> Result<(), String> {
     save_roster(root, &all).map(|_| ())
 }
 
+/// the employee with this name, `None` when nobody has it.
 pub fn employee(root: &Path, name: &str) -> Option<Employee> {
     roster(root).into_iter().find(|e| e.name == name)
 }
@@ -280,7 +285,7 @@ pub fn dispatch<F: FnMut(Event)>(
     settings: Settings,
     who: &Employee,
     task: &str,
-    mut on: F,
+    on: F,
 ) -> Result<String, String> {
     queue_task(root, &who.name, task)?;
     // an employee is a persona: their prompt goes in the system message, where
@@ -294,7 +299,7 @@ pub fn dispatch<F: FnMut(Event)>(
     } else {
         format!("{task}\n\nyour job in this company: {}", who.mission)
     };
-    let answer = runner.run(&request, |e| on(e));
+    let answer = runner.run(&request, on);
     match &answer {
         Ok(text) => close_task(root, &who.name, task, "done", text)?,
         Err(e) => close_task(root, &who.name, task, "failed", e)?,
@@ -476,10 +481,12 @@ mod tests {
         let who = alice();
         // dispatch builds its own client from the settings, so point those at
         // the mock for this run
-        let mut s = Settings::default();
-        s.base_url = Some(url.clone());
-        s.model = Some("mock".into());
-        s.provider = Some("openai-compatible".into());
+        let s = Settings {
+            base_url: Some(url.clone()),
+            model: Some("mock".into()),
+            provider: Some("openai-compatible".into()),
+            ..Settings::default()
+        };
         let answer = dispatch(&d, s, &who, "write the parser", |_| {}).unwrap();
         assert!(answer.contains("protocol"), "{answer}");
         // the employee's persona travelled with the request

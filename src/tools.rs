@@ -20,6 +20,7 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// Builds the tool context for a project, opening its memory, so every tool call of one agent turn shares the same root and sandbox setting.
     pub fn new(root: &Path, sandbox: bool) -> Ctx {
         Ctx {
             root: root.to_path_buf(),
@@ -32,11 +33,18 @@ impl Ctx {
 
 /// the tool declarations handed to the model.
 pub fn specs() -> Vec<ToolSpec> {
+    let mut all = file_specs();
+    all.extend(memory_specs());
+    all
+}
+
+/// the files and the shell: what the model does to the project itself.
+fn file_specs() -> Vec<ToolSpec> {
     let obj = |props: Value, required: Value| json!({"type": "object", "properties": props, "required": required});
     vec![
         ToolSpec {
             name: "read_file".into(),
-            description: "read a text file of the project. returns the lines, numbered.".into(),
+            description: "read a text file of the project. returns the lines, numbered. a long file comes back 200 lines at a time: when more is left, the reply says where the next read starts.".into(),
             parameters: obj(
                 json!({
                     "path": {"type": "string", "description": "path relative to the project"},
@@ -97,6 +105,13 @@ pub fn specs() -> Vec<ToolSpec> {
                 .into(),
             parameters: obj(json!({"command": {"type": "string"}}), json!(["command"])),
         },
+    ]
+}
+
+/// the memory of the project: read, write, check and tidy the pages.
+fn memory_specs() -> Vec<ToolSpec> {
+    let obj = |props: Value, required: Value| json!({"type": "object", "properties": props, "required": required});
+    vec![
         ToolSpec {
             name: "memory_list".into(),
             description:
@@ -180,6 +195,7 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
+/// Turns a path given by the model into an absolute path under the project, refusing one that leaves the project when the sandbox is on.
 pub(crate) fn resolve(ctx: &Ctx, raw: &str) -> Result<PathBuf, String> {
     let p = PathBuf::from(raw);
     let joined = if p.is_absolute() { p } else { ctx.root.join(p) };
@@ -196,6 +212,9 @@ pub(crate) fn resolve(ctx: &Ctx, raw: &str) -> Result<PathBuf, String> {
 }
 
 /// commands that destroy work. they are never run silently.
+/// how many lines one read_file call returns when it names no end: long files come back in chunks.
+const READ_CHUNK_LINES: usize = 200;
+
 const DESTRUCTIVE: &[&str] = &[
     "rm -rf",
     "rm -fr",
@@ -221,17 +240,20 @@ const DESTRUCTIVE: &[&str] = &[
     "truncate -s 0",
 ];
 
+/// Returns the destructive pattern the command matches, or None, so a shell call that could erase data needs the user's approval.
 pub fn flagged(command: &str) -> Option<&'static str> {
     let c = command.to_ascii_lowercase();
     DESTRUCTIVE.iter().find(|d| c.contains(*d)).copied()
 }
 
+/// Reads a required string argument from the tool call, with an error that names the missing key for the model.
 fn arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("missing argument « {key} »"))
 }
 
+/// Reads an optional whole-number argument, None when the key is absent or not a number.
 fn arg_u64(args: &Value, key: &str) -> Option<u64> {
     args.get(key).and_then(|v| v.as_u64())
 }
@@ -239,253 +261,307 @@ fn arg_u64(args: &Value, key: &str) -> Option<u64> {
 /// run one tool call, and answer with text the model can read.
 pub fn run(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> {
     match name {
-        "read_file" => {
-            let path = resolve(ctx, arg(args, "path")?)?;
-            let text =
-                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let lines: Vec<&str> = text.lines().collect();
-            let start = arg_u64(args, "start").unwrap_or(1).max(1) as usize;
-            let end = arg_u64(args, "end").unwrap_or(lines.len() as u64) as usize;
-            let end = end.min(lines.len());
-            let mut out = String::new();
-            for (i, l) in lines.iter().enumerate() {
-                let n = i + 1;
-                if n < start || n > end {
-                    continue;
-                }
-                out.push_str(&format!("{n:>5} | {l}\n"));
-            }
-            if out.is_empty() {
-                out.push_str("(no lines in that range)\n");
-            }
-            Ok(out)
-        }
-        "write_file" => {
-            let path = resolve(ctx, arg(args, "path")?)?;
-            let content = arg(args, "content")?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            std::fs::write(&path, content).map_err(|e| e.to_string())?;
-            Ok(format!(
-                "wrote {} ({} bytes)",
-                path.display(),
-                content.len()
-            ))
-        }
-        "edit_file" => {
-            let path = resolve(ctx, arg(args, "path")?)?;
-            let find = arg(args, "find")?;
-            let replace = arg(args, "replace")?;
-            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            match text.matches(find).count() {
-                0 => Err("the passage to replace was not found".into()),
-                1 => {
-                    std::fs::write(&path, text.replacen(find, replace, 1))
-                        .map_err(|e| e.to_string())?;
-                    Ok(format!("edited {}", path.display()))
-                }
-                n => Err(format!("the passage appears {n} times — be more specific")),
-            }
-        }
-        "list_dir" => {
-            let raw = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            let path = resolve(ctx, raw)?;
-            let mut names: Vec<String> = Vec::new();
-            for e in std::fs::read_dir(&path)
-                .map_err(|e| e.to_string())?
-                .flatten()
-            {
-                let p = e.path();
-                let name = p
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                if p.is_dir() {
-                    names.push(format!("{name}/"));
-                } else {
-                    let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                    names.push(format!("{name} ({size} b)"));
-                }
-            }
-            names.sort();
-            Ok(if names.is_empty() {
-                "(empty)".into()
-            } else {
-                names.join("\n")
-            })
-        }
-        "grep" => {
-            let pattern = arg(args, "pattern")?;
-            let raw = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            let base = resolve(ctx, raw)?;
-            let max = arg_u64(args, "max").unwrap_or(40) as usize;
-            let mut hits: Vec<String> = Vec::new();
-            walk(&base, &mut |p| {
-                if hits.len() >= max {
-                    return;
-                }
-                let Ok(text) = std::fs::read_to_string(p) else {
-                    return;
-                };
-                for (i, line) in text.lines().enumerate() {
-                    if line.contains(pattern) {
-                        let rel = p.strip_prefix(&ctx.root).unwrap_or(p);
-                        hits.push(format!("{}:{}: {}", rel.display(), i + 1, line.trim()));
-                        if hits.len() >= max {
-                            break;
-                        }
-                    }
-                }
-            });
-            Ok(if hits.is_empty() {
-                "no match".into()
-            } else {
-                hits.join("\n")
-            })
-        }
-        "run_shell" => {
-            let command = arg(args, "command")?;
-            if let Some(why) = flagged(command) {
-                let allowed = ctx.approved.iter().any(|a| command.contains(a.as_str()));
-                if !allowed {
-                    return Err(format!(
-                        "« {command} » looks destructive ({why}) — it needs your explicit approval"
-                    ));
-                }
-            }
-            let out = Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .current_dir(&ctx.root)
-                .output()
-                .map_err(|e| format!("could not run it: {e}"))?;
-            let mut text = String::from_utf8_lossy(&out.stdout).to_string();
-            let err = String::from_utf8_lossy(&out.stderr);
-            if !err.trim().is_empty() {
-                text.push_str("\n[stderr]\n");
-                text.push_str(&err);
-            }
-            if text.len() > 8000 {
-                text.truncate(8000);
-                text.push_str("\n… (truncated)");
-            }
-            Ok(format!(
-                "exit {}\n{}",
-                out.status.code().unwrap_or(-1),
-                text.trim_end()
-            ))
-        }
-        "memory_list" => {
-            let entries = ctx.memory.list();
-            if entries.is_empty() {
-                return Ok("this project has no memory yet".into());
-            }
-            Ok(entries
-                .iter()
-                .map(|e| {
-                    let mut line = format!("{}: {} — {}", e.class.id(), e.name, e.title);
-                    if let Some(u) = &e.updated {
-                        line.push_str(&format!(" (updated {u}"));
-                        if let Some(c) = e.confidence {
-                            line.push_str(&format!(", confidence {}", c.id()));
-                        }
-                        if e.stale() {
-                            line.push_str(", stale: check it before trusting it");
-                        }
-                        line.push(')');
-                    }
-                    if e.check.is_some() {
-                        line.push_str(" [checkable]");
-                    }
-                    line
-                })
-                .collect::<Vec<_>>()
-                .join("\n"))
-        }
-        "memory_check" => {
-            let class = Class::parse(arg(args, "class")?)
-                .ok_or_else(|| "classes are user, feedback, project, reference".to_string())?;
-            let name = arg(args, "name")?;
-            let entry = ctx
-                .memory
-                .list()
-                .into_iter()
-                .find(|e| e.class == class && e.name == name)
-                .ok_or_else(|| format!("no page « {name} » in {}", class.id()))?;
-            // the page's own check is a shell command, so it passes the same
-            // gate as any shell call: a destructive check needs approval too.
-            let Some(check) = entry.check else {
-                return Ok(format!(
-                    "no check on « {name} »: its claim is not verified by a command"
-                ));
-            };
-            let out = run("run_shell", &json!({"command": check}), ctx)?;
-            if out.starts_with("exit 0") {
-                Ok(format!("holds: {name}"))
-            } else {
-                Ok(format!("does not hold: {name}\n{out}"))
-            }
-        }
-        "memory_tidy" => {
-            let tidy = ctx.memory.tidy();
-            if tidy.removed.is_empty() {
-                return Ok("memory tidy: nothing stale and no copy".into());
-            }
-            let mut lines =
-                vec!["memory tidy, removed without asking (kept in the history):".to_string()];
-            lines.extend(tidy.removed.iter().map(|r| format!("removed: {r}")));
-            Ok(lines.join("\n"))
-        }
-        "memory_audit" => {
-            let audit = ctx.memory.audit();
-            if audit.duplicates.is_empty() && audit.stale.is_empty() && audit.forgotten.is_empty() {
-                return Ok("memory audit: no duplicate, no stale and no forgotten page".into());
-            }
-            let mut lines = vec!["memory audit, nothing was changed:".to_string()];
-            for (a, b) in &audit.duplicates {
-                lines.push(format!("duplicate: {a} and {b} say the same thing"));
-            }
-            for s in &audit.stale {
-                lines.push(format!("stale: {s} is past its limit, check it"));
-            }
-            for f in &audit.forgotten {
-                lines.push(format!("forgotten: {f} is no longer used, it fades"));
-            }
-            Ok(lines.join("\n"))
-        }
-        "memory_read" => {
-            let class = Class::parse(arg(args, "class")?)
-                .ok_or_else(|| "classes are user, feedback, project, reference".to_string())?;
-            let name = arg(args, "name")?;
-            let body = ctx.memory.read(class, name)?;
-            let _ = ctx.memory.reinforce(class, name);
-            Ok(body)
-        }
-        "memory_write" => {
-            let class = Class::parse(arg(args, "class")?)
-                .ok_or_else(|| "classes are user, feedback, project, reference".to_string())?;
-            let confidence = match args.get("confidence").and_then(Value::as_str) {
-                Some(c) => crate::memory::Confidence::parse(c)
-                    .ok_or_else(|| "confidence is low, medium or high".to_string())?,
-                None => crate::memory::Confidence::Medium,
-            };
-            let check = args
-                .get("check")
-                .and_then(Value::as_str)
-                .filter(|c| !c.trim().is_empty());
-            let path = ctx.memory.write_checked(
-                class,
-                arg(args, "name")?,
-                arg(args, "content")?,
-                confidence,
-                check,
-            )?;
-            Ok(format!("remembered in {}", path.display()))
-        }
+        "read_file" => read_file(args, ctx),
+        "write_file" => write_file(args, ctx),
+        "edit_file" => edit_file(args, ctx),
+        "list_dir" => list_dir(args, ctx),
+        "grep" => grep(args, ctx),
+        "run_shell" => run_shell(args, ctx),
+        "memory_list" => Ok(memory_list(ctx)),
+        "memory_check" => memory_check(args, ctx),
+        "memory_tidy" => Ok(memory_tidy(ctx)),
+        "memory_audit" => Ok(memory_audit(ctx)),
+        "memory_read" => memory_read(args, ctx),
+        "memory_write" => memory_write(args, ctx),
         other => Err(format!("unknown tool « {other} »")),
     }
+}
+
+/// Reads the memory class argument, refusing an unknown class with the four valid ones named.
+fn arg_class(args: &Value) -> Result<Class, String> {
+    Class::parse(arg(args, "class")?)
+        .ok_or_else(|| "classes are user, feedback, project, reference".to_string())
+}
+
+/// Reads a file for the model, with line numbers and an optional start and end, so it can quote exact lines.
+/// Reads a file, or the chunk of it asked for: without an end, at most READ_CHUNK_LINES lines come back,
+/// and the chunk names the start of the next one so the model can read on.
+fn read_file(args: &Value, ctx: &Ctx) -> Result<String, String> {
+    let path = resolve(ctx, arg(args, "path")?)?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let lines: Vec<&str> = text.lines().collect();
+    let (start, end) = read_window(args, lines.len());
+    let mut out = numbered_lines(&lines, start, end);
+    if out.is_empty() {
+        out.push_str("(no lines in that range)\n");
+    } else if end < lines.len() {
+        out.push_str(&format!(
+            "(lines {start} to {end} of {}; read on with \"start\": {})\n",
+            lines.len(),
+            end + 1
+        ));
+    }
+    Ok(out)
+}
+
+/// The first and last line a read asks for, clamped to the file; a read without an end stops at one chunk.
+fn read_window(args: &Value, total: usize) -> (usize, usize) {
+    let start = arg_u64(args, "start").unwrap_or(1).max(1) as usize;
+    let end = match arg_u64(args, "end") {
+        Some(end) => end as usize,
+        None => start + READ_CHUNK_LINES - 1,
+    };
+    (start, end.min(total))
+}
+
+/// The lines from start to end (1-based, inclusive), each with its number, one per row.
+fn numbered_lines(lines: &[&str], start: usize, end: usize) -> String {
+    let mut out = String::new();
+    for n in start..=end {
+        out.push_str(&format!("{n:>5} | {}\n", lines[n - 1]));
+    }
+    out
+}
+
+/// Writes a file the model gave, creating its folders first, and reports the path and size written.
+fn write_file(args: &Value, ctx: &Ctx) -> Result<String, String> {
+    let path = resolve(ctx, arg(args, "path")?)?;
+    let content = arg(args, "content")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, content).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "wrote {} ({} bytes)",
+        path.display(),
+        content.len()
+    ))
+}
+
+/// Replaces one passage of a file, refusing when the passage is missing or appears more than once so the edit is never ambiguous.
+fn edit_file(args: &Value, ctx: &Ctx) -> Result<String, String> {
+    let path = resolve(ctx, arg(args, "path")?)?;
+    let find = arg(args, "find")?;
+    let replace = arg(args, "replace")?;
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    match text.matches(find).count() {
+        0 => Err("the passage to replace was not found".into()),
+        1 => {
+            std::fs::write(&path, text.replacen(find, replace, 1)).map_err(|e| e.to_string())?;
+            Ok(format!("edited {}", path.display()))
+        }
+        n => Err(format!("the passage appears {n} times — be more specific")),
+    }
+}
+
+/// Lists the entries of a directory the model asked for, the current one by default.
+fn list_dir(args: &Value, ctx: &Ctx) -> Result<String, String> {
+    let raw = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let path = resolve(ctx, raw)?;
+    let mut names: Vec<String> = Vec::new();
+    for e in std::fs::read_dir(&path)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
+        let p = e.path();
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if p.is_dir() {
+            names.push(format!("{name}/"));
+        } else {
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            names.push(format!("{name} ({size} b)"));
+        }
+    }
+    names.sort();
+    Ok(if names.is_empty() {
+        "(empty)".into()
+    } else {
+        names.join("\n")
+    })
+}
+
+/// Searches the files under a path for a pattern and returns the matching lines, stopping at the max hits.
+fn grep(args: &Value, ctx: &Ctx) -> Result<String, String> {
+    let pattern = arg(args, "pattern")?;
+    let raw = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let base = resolve(ctx, raw)?;
+    let max = arg_u64(args, "max").unwrap_or(40) as usize;
+    let mut hits: Vec<String> = Vec::new();
+    walk(&base, &mut |p| {
+        if hits.len() >= max {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(p) else {
+            return;
+        };
+        for (i, line) in text.lines().enumerate() {
+            if line.contains(pattern) {
+                let rel = p.strip_prefix(&ctx.root).unwrap_or(p);
+                hits.push(format!("{}:{}: {}", rel.display(), i + 1, line.trim()));
+                if hits.len() >= max {
+                    break;
+                }
+            }
+        }
+    });
+    Ok(if hits.is_empty() {
+        "no match".into()
+    } else {
+        hits.join("\n")
+    })
+}
+
+/// Runs a shell command in the project root, after the destructive check, and returns its output.
+fn run_shell(args: &Value, ctx: &Ctx) -> Result<String, String> {
+    let command = arg(args, "command")?;
+    if let Some(why) = flagged(command) {
+        let allowed = ctx.approved.iter().any(|a| command.contains(a.as_str()));
+        if !allowed {
+            return Err(format!(
+                "« {command} » looks destructive ({why}) — it needs your explicit approval"
+            ));
+        }
+    }
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(&ctx.root)
+        .output()
+        .map_err(|e| format!("could not run it: {e}"))?;
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !err.trim().is_empty() {
+        text.push_str("\n[stderr]\n");
+        text.push_str(&err);
+    }
+    if text.len() > 8000 {
+        text.truncate(8000);
+        text.push_str("\n... (truncated)");
+    }
+    Ok(format!(
+        "exit {}\n{}",
+        out.status.code().unwrap_or(-1),
+        text.trim_end()
+    ))
+}
+
+/// Lists the memory pages of the project, or says there are none yet.
+fn memory_list(ctx: &Ctx) -> String {
+    let entries = ctx.memory.list();
+    if entries.is_empty() {
+        return "this project has no memory yet".into();
+    }
+    entries
+        .iter()
+        .map(|e| {
+            let mut line = format!("{}: {} — {}", e.class.id(), e.name, e.title);
+            if let Some(u) = &e.updated {
+                line.push_str(&format!(" (updated {u}"));
+                if let Some(c) = e.confidence {
+                    line.push_str(&format!(", confidence {}", c.id()));
+                }
+                if e.stale() {
+                    line.push_str(", stale: check it before trusting it");
+                }
+                line.push(')');
+            }
+            if e.check.is_some() {
+                line.push_str(" [checkable]");
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Runs the check attached to a memory page and reports whether it still holds, so a stale page is not trusted blindly.
+fn memory_check(args: &Value, ctx: &Ctx) -> Result<String, String> {
+    let class = arg_class(args)?;
+    let name = arg(args, "name")?;
+    let entry = ctx
+        .memory
+        .list()
+        .into_iter()
+        .find(|e| e.class == class && e.name == name)
+        .ok_or_else(|| format!("no page « {name} » in {}", class.id()))?;
+    // the page's own check is a shell command, so it passes the same
+    // gate as any shell call: a destructive check needs approval too.
+    let Some(check) = entry.check else {
+        return Ok(format!(
+            "no check on « {name} »: its claim is not verified by a command"
+        ));
+    };
+    let out = run_shell(&json!({"command": check}), ctx)?;
+    if out.starts_with("exit 0") {
+        Ok(format!("holds: {name}"))
+    } else {
+        Ok(format!("does not hold: {name}\n{out}"))
+    }
+}
+
+/// Removes the stale memory pages and reports what was removed, the history keeping a copy of each.
+fn memory_tidy(ctx: &Ctx) -> String {
+    let tidy = ctx.memory.tidy();
+    if tidy.removed.is_empty() {
+        return "memory tidy: nothing stale and no copy".into();
+    }
+    let mut lines = vec!["memory tidy, removed without asking (kept in the history):".to_string()];
+    lines.extend(tidy.removed.iter().map(|r| format!("removed: {r}")));
+    lines.join("\n")
+}
+
+/// Reports the duplicate, stale and forgotten memory pages without changing any of them.
+fn memory_audit(ctx: &Ctx) -> String {
+    let audit = ctx.memory.audit();
+    if audit.duplicates.is_empty() && audit.stale.is_empty() && audit.forgotten.is_empty() {
+        return "memory audit: no duplicate, no stale and no forgotten page".into();
+    }
+    let mut lines = vec!["memory audit, nothing was changed:".to_string()];
+    for (a, b) in &audit.duplicates {
+        lines.push(format!("duplicate: {a} and {b} say the same thing"));
+    }
+    for s in &audit.stale {
+        lines.push(format!("stale: {s} is past its limit, check it"));
+    }
+    for f in &audit.forgotten {
+        lines.push(format!("forgotten: {f} is no longer used, it fades"));
+    }
+    lines.join("\n")
+}
+
+/// Reads a memory page and counts the read as a use, leaving its body untouched.
+fn memory_read(args: &Value, ctx: &Ctx) -> Result<String, String> {
+    let class = arg_class(args)?;
+    let name = arg(args, "name")?;
+    let body = ctx.memory.read(class, name)?;
+    let _ = ctx.memory.reinforce(class, name);
+    Ok(body)
+}
+
+/// Writes a memory page with its confidence and optional check, the check being kept in the page footer for a later run to verify.
+fn memory_write(args: &Value, ctx: &Ctx) -> Result<String, String> {
+    let class = arg_class(args)?;
+    let confidence = match args.get("confidence").and_then(Value::as_str) {
+        Some(c) => crate::memory::Confidence::parse(c)
+            .ok_or_else(|| "confidence is low, medium or high".to_string())?,
+        None => crate::memory::Confidence::Medium,
+    };
+    let check = args
+        .get("check")
+        .and_then(Value::as_str)
+        .filter(|c| !c.trim().is_empty());
+    let path = ctx.memory.write_checked(
+        class,
+        arg(args, "name")?,
+        arg(args, "content")?,
+        confidence,
+        check,
+    )?;
+    Ok(format!("remembered in {}", path.display()))
 }
 
 /// walk the project, skipping the usual noise.
@@ -533,6 +609,41 @@ mod tests {
         )
         .unwrap();
         assert!(part.contains("two") && !part.contains("one"), "{part}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_long_file_is_read_in_chunks_that_name_the_next_start() {
+        let d = tmp("chunks");
+        let text: String = (1..=450).map(|n| format!("row {n}\n")).collect();
+        std::fs::write(d.join("long.txt"), text).unwrap();
+        let ctx = Ctx::new(&d, true);
+        let first = run("read_file", &json!({"path": "long.txt"}), &ctx).unwrap();
+        assert!(first.contains("200 | row 200"), "{first}");
+        assert!(!first.contains("201 | row 201"), "{first}");
+        assert!(
+            first.contains("lines 1 to 200 of 450") && first.contains("\"start\": 201"),
+            "the chunk must say where the next read starts: {first}"
+        );
+        let next = run(
+            "read_file",
+            &json!({"path": "long.txt", "start": 201}),
+            &ctx,
+        )
+        .unwrap();
+        assert!(next.contains("201 | row 201"), "{next}");
+        assert!(next.contains("lines 201 to 400 of 450"), "{next}");
+        let last = run(
+            "read_file",
+            &json!({"path": "long.txt", "start": 401}),
+            &ctx,
+        )
+        .unwrap();
+        assert!(last.contains("450 | row 450"), "{last}");
+        assert!(
+            !last.contains("\"start\""),
+            "the last chunk ends the file: {last}"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

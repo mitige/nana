@@ -7,12 +7,27 @@
 //! --show-prompt` prints exactly what the model receives.
 
 use crate::persona::{self, Persona};
-use crate::provider::{Client, Msg, Reply, Role};
+use crate::provider::{Client, Msg, Reply, Role, ToolCall};
 use crate::settings::{self, Settings};
 use crate::skills::{self, Skill};
 use crate::tools::{self, Ctx};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+
+mod context;
+mod live_event;
+mod prompt_rules;
+mod recall;
+mod sessions;
+use context::{cap_context, shrink_old_tool_results, CONTEXT_CAP_CHARS, KEEP_WHOLE_RESULTS};
+use live_event::file_event;
+use prompt_rules::{
+    autonomy_section, identity_section, read_instructions, structure_section, tools_section,
+    MEMORY_RULES,
+};
+use recall::RECALL_BUDGET;
+use sessions::new_session_path;
+pub use sessions::{latest_session, sessions};
 
 /// a section of the system prompt, with its position. lower order = earlier.
 #[derive(Debug, Clone)]
@@ -69,11 +84,15 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// Builds the agent for a project: resolves the client from the settings, then
+    /// assembles the agent around it. Hands back the agent, or the reason no client could start.
     pub fn new(root: &Path, settings: Settings) -> Result<Agent, String> {
         let client = Client::resolve(&settings, root)?;
         Ok(Agent::with_client(root, settings, client))
     }
 
+    /// Builds the agent around a ready client, loading the persona, skills and project
+    /// instructions once so every turn reuses them.
     pub fn with_client(root: &Path, settings: Settings, client: Client) -> Agent {
         let persona = settings
             .persona
@@ -164,32 +183,44 @@ impl Agent {
         format!("checks run for you:\n{}\n", lines.join("\n"))
     }
 
-    /// the ordered sections of the system prompt.
+    /// the ordered sections of the system prompt: each one is built by its own
+    /// helper, then they are sorted so the prompt reads in a fixed order.
     pub fn sections(&self, request: &str) -> Vec<Section> {
-        let mut out: Vec<Section> = Vec::new();
-        out.push(Section {
-            order: -1000,
-            name: "identity",
-            text:
-                "you are the agent inside nana, a terminal editor. you work in the user's project, \
-                   you use the tools you are given, and you say what you did."
-                    .into(),
-        });
-        // the persona sits right after the identity, before everything else
-        if let Some(p) = &self.persona {
-            out.push(Section {
-                order: 0,
-                name: "persona",
-                text: format!("{}\n\n{}", p.title, p.prompt),
-            });
-        }
-        if let Some(instr) = &self.instructions {
-            out.push(Section {
-                order: 200,
-                name: "project-instructions",
-                text: format!("instructions of this project (AGENTS.md):\n{instr}"),
-            });
-        }
+        let mut out: Vec<Section> = vec![identity_section()];
+        out.extend(self.persona_section());
+        out.extend(self.instructions_section());
+        out.extend(self.skill_sections(request));
+        out.push(self.memory_section(request));
+        out.extend(self.knowledge_section());
+        out.push(tools_section());
+        out.push(structure_section());
+        out.push(autonomy_section());
+        out.push(self.suffix_section());
+        out.sort_by_key(|s| s.order);
+        out
+    }
+
+    /// the persona sits right after the identity, before everything else.
+    fn persona_section(&self) -> Option<Section> {
+        self.persona.as_ref().map(|p| Section {
+            order: 0,
+            name: "persona",
+            text: format!("{}\n\n{}", p.title, p.prompt),
+        })
+    }
+
+    /// the project's AGENTS.md, read as the project's own rules.
+    fn instructions_section(&self) -> Option<Section> {
+        self.instructions.as_ref().map(|instr| Section {
+            order: 200,
+            name: "project-instructions",
+            text: format!("instructions of this project (AGENTS.md):\n{instr}"),
+        })
+    }
+
+    /// the skill index, then the full body of every skill the request matches.
+    fn skill_sections(&self, request: &str) -> Vec<Section> {
+        let mut out = Vec::new();
         let idx = skills::index(&self.skills);
         if !idx.is_empty() {
             out.push(Section {
@@ -205,76 +236,58 @@ impl Agent {
                 text: format!("skill « {} » — follow it:\n{}", s.name, s.body),
             });
         }
-        // always present: an agent that never hears about memory never writes any
-        let mem = self.ctx.memory.index();
-        let known = if mem.is_empty() {
-            "the memory of this project is empty so far.\n".to_string()
-        } else {
-            let recalled = self.ctx.memory.recall(request, RECALL_BUDGET);
-            let checks = self.touched_checks(request);
-            if recalled.is_empty() {
-                mem
-            } else {
-                format!("{mem}the pages this request touches, read for you:\n{recalled}{checks}")
-            }
-        };
-        out.push(Section {
-            order: 400,
-            name: "memory",
-            text: format!(
-                "{known}memory is a world model of this project: what is true of its state, \
-                 its conventions, and how it behaves. a wrong page is a bug to fix, not a fact to trust.\n\
-                 memory rules, each one is a duty, not a suggestion:\n\
-                 - when a task starts: call memory_list, then memory_read on every page that touches the \
-                 task. before you act on a page, say what you expect from it.\n\
-                 - when you check a fact: after acting, verify the result with a tool against that \
-                 expectation, and run memory_check on any page that carries a check.\n\
-                 - when a page is wrong: correct the page with memory_write at once, and say which belief was wrong.\n\
-                 - when the user states a preference or a rule: write it as a feedback or user page with memory_write.\n\
-                 - when a decision is made: write a project page with the reason, so the next run does not reopen it.\n\
-                 - when a task ends: write what was learned, the conventions met and the pitfalls hit, \
-                 with memory_write, before your final words.\n\
-                 - before your final words: ask yourself whether anything durable happened in this run; \
-                 if yes, the memory write comes first, the answer comes after."
-            ),
-        });
-        let wiki = crate::knowledge::index(&self.root);
-        if !wiki.is_empty() {
-            out.push(Section {
-                order: 450,
-                name: "knowledge",
-                text: format!(
-                    "{wiki}read a page with the read_file tool when it matters. when a session \
-                     teaches something durable, it is worth a page."
-                ),
-            });
-        }
-        out.push(Section {
-            order: 1000,
-            name: "tools",
-            text: "tools: files and the shell are scoped to this project. a destructive \
-                   command is refused unless the user approved it — never try to work around that."
-                .into(),
-        });
-        // the model stops early when it is unsure it may go on; say plainly that it may
-        out.push(Section {
-            order: 1100,
-            name: "autonomy",
-            text: "work in one unbroken run until the task is finished. do not stop to ask \
-                   whether to continue, do not ask permission between steps, and do not end \
-                   your turn with a plan. act, check the result with a tool, and keep going. \
-                   only answer in words when the task is done or when you are truly blocked."
-                .into(),
-        });
-        out.push(Section {
-            order: 10200,
-            name: "suffix",
-            text: format!("your working directory is {}.", self.root.display()),
-        });
-        out.sort_by_key(|s| s.order);
         out
     }
 
+    /// always present: an agent that never hears about memory never writes any.
+    fn memory_section(&self, request: &str) -> Section {
+        Section {
+            order: 400,
+            name: "memory",
+            text: format!("{}{MEMORY_RULES}", self.memory_known(request)),
+        }
+    }
+
+    /// the memory index, plus the pages this request touches and their checks.
+    fn memory_known(&self, request: &str) -> String {
+        let mem = self.ctx.memory.index();
+        if mem.is_empty() {
+            return "the memory of this project is empty so far.\n".to_string();
+        }
+        let recalled = self.ctx.memory.recall(request, RECALL_BUDGET);
+        if recalled.is_empty() {
+            return mem;
+        }
+        let checks = self.touched_checks(request);
+        format!("{mem}the pages this request touches, read for you:\n{recalled}{checks}")
+    }
+
+    /// the knowledge wiki index, when the project has one.
+    fn knowledge_section(&self) -> Option<Section> {
+        let wiki = crate::knowledge::index(&self.root);
+        if wiki.is_empty() {
+            return None;
+        }
+        Some(Section {
+            order: 450,
+            name: "knowledge",
+            text: format!(
+                "{wiki}read a page with the read_file tool when it matters. when a session \
+                 teaches something durable, it is worth a page."
+            ),
+        })
+    }
+
+    /// the working directory, the last line of the prompt.
+    fn suffix_section(&self) -> Section {
+        Section {
+            order: 10200,
+            name: "suffix",
+            text: format!("your working directory is {}.", self.root.display()),
+        }
+    }
+
+    /// Joins the prompt sections for one request into the system text sent to the model.
     pub fn system_prompt(&self, request: &str) -> String {
         self.sections(request)
             .into_iter()
@@ -297,11 +310,7 @@ impl Agent {
         // no step cap: a long session runs until the model answers in words
         // (or the provider fails); stopping on a count left people re-prompting.
         let mut step = 0;
-        // durable work ends in a memory page: a run that changed files and
-        // answers without one is sent back once, never more, so it cannot loop
-        let mut changed_files = false;
-        let mut remembered = false;
-        let mut sent_back = false;
+        let mut progress = Progress::default();
         loop {
             step += 1;
             self.steps = step;
@@ -317,78 +326,104 @@ impl Agent {
             if !reply.text.trim().is_empty() {
                 on(Event::Text(reply.text.clone()));
             }
-            if reply.tool_calls.is_empty() && changed_files && !remembered && !sent_back {
-                sent_back = true;
-                self.messages.push(Msg {
-                    role: Role::Assistant,
-                    content: reply.text.clone(),
-                    tool_calls: Vec::new(),
-                    tool_call_id: None,
-                });
-                let nudge = "you changed files without a memory page. before you answer, \
-                              write what this change taught you with memory_write: \
-                              a convention, a decision, or a pitfall you hit.";
-                self.messages.push(Msg::user(nudge));
-                self.log("assistant", &reply.text, None, None);
-                self.log("user", nudge, None, None);
+            if self.owes_memory_page(&reply, &mut progress) {
                 continue;
             }
             if reply.tool_calls.is_empty() {
-                self.messages.push(Msg {
-                    role: Role::Assistant,
-                    content: reply.text.clone(),
-                    tool_calls: Vec::new(),
-                    tool_call_id: None,
-                });
-                self.log("assistant", &reply.text, None, None);
+                self.record_answer(&reply.text);
                 on(Event::Finished { steps: step });
                 return Ok(reply.text);
             }
-            // the model wants tools: answer every call, then loop
-            self.messages.push(Msg {
-                role: Role::Assistant,
-                content: reply.text.clone(),
-                tool_calls: reply.tool_calls.clone(),
-                tool_call_id: None,
+            self.record_tool_request(&reply);
+            self.answer_tool_calls(&reply.tool_calls, &mut progress, &mut on);
+        }
+    }
+
+    /// a run that changed files and answers without a memory page is sent back
+    /// once, never more, so it cannot loop. returns true when it was sent back.
+    fn owes_memory_page(&mut self, reply: &Reply, progress: &mut Progress) -> bool {
+        let owed = reply.tool_calls.is_empty()
+            && progress.changed_files
+            && !progress.remembered
+            && !progress.sent_back;
+        if !owed {
+            return false;
+        }
+        progress.sent_back = true;
+        self.messages.push(Msg {
+            role: Role::Assistant,
+            content: reply.text.clone(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        });
+        let nudge = "you changed files without a memory page. before you answer, \
+                      write what this change taught you with memory_write: \
+                      a convention, a decision, or a pitfall you hit.";
+        self.messages.push(Msg::user(nudge));
+        self.log("assistant", &reply.text, None, None);
+        self.log("user", nudge, None, None);
+        true
+    }
+
+    /// keeps the final answer of a run in the conversation and the transcript.
+    fn record_answer(&mut self, text: &str) {
+        self.messages.push(Msg {
+            role: Role::Assistant,
+            content: text.to_string(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        });
+        self.log("assistant", text, None, None);
+    }
+
+    /// keeps the model's tool request, so every call below has its answer after it.
+    fn record_tool_request(&mut self, reply: &Reply) {
+        self.messages.push(Msg {
+            role: Role::Assistant,
+            content: reply.text.clone(),
+            tool_calls: reply.tool_calls.clone(),
+            tool_call_id: None,
+        });
+    }
+
+    /// answers every call the model asked for, in order, then the loop goes on.
+    fn answer_tool_calls<F: FnMut(Event)>(
+        &mut self,
+        calls: &[ToolCall],
+        progress: &mut Progress,
+        on: &mut F,
+    ) {
+        for call in calls {
+            on(Event::ToolCall {
+                name: call.name.clone(),
+                args: call.args.clone(),
             });
-            for call in &reply.tool_calls {
-                on(Event::ToolCall {
-                    name: call.name.clone(),
-                    args: call.args.clone(),
+            if let Some((path, content, write)) = file_event(&call.name, &call.args, &self.ctx) {
+                on(Event::File {
+                    path,
+                    content,
+                    write,
                 });
-                if let Some((path, content, write)) = file_event(&call.name, &call.args, &self.ctx)
-                {
-                    on(Event::File {
-                        path,
-                        content,
-                        write,
-                    });
-                }
-                let result = tools::run(&call.name, &call.args, &self.ctx);
-                let (ok, text) = match result {
-                    Ok(t) => (true, t),
-                    Err(e) => (false, format!("error: {e}")),
-                };
-                if ok {
-                    match call.name.as_str() {
-                        "write_file" | "edit_file" => changed_files = true,
-                        "memory_write" => remembered = true,
-                        _ => {}
-                    }
-                }
-                on(Event::ToolResult {
-                    name: call.name.clone(),
-                    ok,
-                    text: text.clone(),
-                });
-                self.messages.push(Msg::tool(&call.id, text.clone()));
-                self.log(
-                    "tool",
-                    &text,
-                    Some(call.name.clone()),
-                    Some(call.id.clone()),
-                );
             }
+            let (ok, text) = match tools::run(&call.name, &call.args, &self.ctx) {
+                Ok(t) => (true, t),
+                Err(e) => (false, format!("error: {e}")),
+            };
+            if ok {
+                progress.note(&call.name);
+            }
+            on(Event::ToolResult {
+                name: call.name.clone(),
+                ok,
+                text: text.clone(),
+            });
+            self.messages.push(Msg::tool(&call.id, text.clone()));
+            self.log(
+                "tool",
+                &text,
+                Some(call.name.clone()),
+                Some(call.id.clone()),
+            );
         }
     }
 
@@ -423,150 +458,24 @@ impl Agent {
 /// the file a tool is about to touch, with the text it will write. only the
 /// writes are shown before they land: a read shows what the tool returns.
 /// how much memory the prompt may carry for one request, in characters.
-const RECALL_BUDGET: usize = 6000;
-
-/// the newest tool results stay whole; older ones keep a head so the model
-/// still sees what they were, and it can run the tool again to see the rest.
-const KEEP_WHOLE_RESULTS: usize = 4;
-const OLD_RESULT_HEAD: usize = 300;
-/// ceiling on the characters sent in one turn (system prompt included).
-const CONTEXT_CAP_CHARS: usize = 200_000;
-
-/// a long session re-sends every message on each turn. an old tool result
-/// (a file read, a grep) is the bulk of that, and it is stale by then: cut it
-/// to its head, keep the call id so the pairing with the call stays valid.
-fn shrink_old_tool_results(msgs: &mut [Msg], keep_whole: usize) {
-    let tools: Vec<usize> = msgs
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.role == Role::Tool)
-        .map(|(i, _)| i)
-        .collect();
-    let old = tools.len().saturating_sub(keep_whole);
-    for &i in &tools[..old] {
-        let m = &mut msgs[i];
-        if m.content.chars().count() <= OLD_RESULT_HEAD {
-            continue;
-        }
-        let head: String = m.content.chars().take(OLD_RESULT_HEAD).collect();
-        m.content = format!(
-            "{head}\n[… {} characters elided from an older result; run the tool again to see them]",
-            m.content.chars().count() - OLD_RESULT_HEAD
-        );
-    }
+/// what a run has done so far, to decide whether it owes a memory page.
+/// the flags only move forward: once a run wrote memory, it is never owed again.
+#[derive(Default)]
+struct Progress {
+    changed_files: bool,
+    remembered: bool,
+    sent_back: bool,
 }
 
-/// what one turn actually sends: the system prompt and every message. the
-/// cap is measured on this, not on the messages alone, or the prompt grows
-/// past the budget unseen.
-fn context_chars(system: &str, msgs: &[Msg]) -> usize {
-    system.chars().count()
-        + msgs
-            .iter()
-            .map(|m| m.content.chars().count())
-            .sum::<usize>()
-}
-
-/// a hard ceiling on the context of one turn. when the sum is over it, the
-/// oldest tool results are cut to their head first, one after the other,
-/// until the sum fits. the user messages are never cut, and the newest result
-/// is the last one touched.
-fn cap_context(system: &str, msgs: &mut [Msg], cap: usize) {
-    let mut over = context_chars(system, msgs).saturating_sub(cap);
-    if over == 0 {
-        return;
-    }
-    let tools: Vec<usize> = msgs
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.role == Role::Tool)
-        .map(|(i, _)| i)
-        .collect();
-    for i in tools {
-        if over == 0 {
-            break;
-        }
-        let len = msgs[i].content.chars().count();
-        if len <= OLD_RESULT_HEAD {
-            continue;
-        }
-        let head: String = msgs[i].content.chars().take(OLD_RESULT_HEAD).collect();
-        let cut = len - OLD_RESULT_HEAD;
-        msgs[i].content = format!(
-            "{head}\n[... {cut} characters elided to keep the context under its cap; run the tool again to see them]"
-        );
-        over = over.saturating_sub(cut);
-    }
-}
-
-fn file_event(name: &str, args: &Value, ctx: &crate::tools::Ctx) -> Option<(String, String, bool)> {
-    match name {
-        "write_file" => Some((
-            args.get("path")?.as_str()?.to_string(),
-            args.get("content")?.as_str()?.to_string(),
-            true,
-        )),
-        // a read shows the file as it is now, before the tool runs, through the
-        // same path check as the tool: a sandboxed read is never shown either
-        "read_file" => {
-            let raw = args.get("path")?.as_str()?;
-            let path = crate::tools::resolve(ctx, raw).ok()?;
-            let text = std::fs::read_to_string(&path).ok()?;
-            Some((raw.to_string(), text, false))
-        }
-        _ => None,
-    }
-}
-
-/// AGENTS.md, at the root or inside the project directory.
-fn read_instructions(root: &Path, project_dir: &str) -> Option<String> {
-    for candidate in [
-        root.join("AGENTS.md"),
-        root.join(project_dir).join("AGENTS.md"),
-    ] {
-        if let Ok(t) = std::fs::read_to_string(&candidate) {
-            if !t.trim().is_empty() {
-                return Some(t);
-            }
+impl Progress {
+    /// records a tool that succeeded: file edits and memory writes count.
+    fn note(&mut self, tool: &str) {
+        match tool {
+            "write_file" | "edit_file" => self.changed_files = true,
+            "memory_write" => self.remembered = true,
+            _ => {}
         }
     }
-    None
-}
-
-fn sessions_dir(root: &Path) -> PathBuf {
-    root.join(settings::PROJECT_DIR).join("sessions")
-}
-
-fn new_session_path(root: &Path) -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    sessions_dir(root).join(format!("{stamp}-{}.jsonl", std::process::id()))
-}
-
-/// the most recent transcript of this project.
-pub fn latest_session(root: &Path) -> Option<PathBuf> {
-    let dir = sessions_dir(root);
-    let mut all: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("jsonl"))
-        .collect();
-    all.sort();
-    all.pop()
-}
-
-/// every transcript, newest first — what the memory box lists.
-pub fn sessions(root: &Path) -> Vec<PathBuf> {
-    let mut all: Vec<PathBuf> = std::fs::read_dir(sessions_dir(root))
-        .map(|rd| rd.flatten().map(|e| e.path()).collect())
-        .unwrap_or_default();
-    all.retain(|p| p.extension().and_then(|x| x.to_str()) == Some("jsonl"));
-    all.sort();
-    all.reverse();
-    all
 }
 
 #[cfg(test)]
@@ -607,6 +516,7 @@ mod tests {
         }
         String::from_utf8_lossy(&buf).to_string()
     }
+    use super::context::context_chars;
     use super::*;
     use std::io::Write;
     use std::net::TcpListener;
@@ -653,9 +563,31 @@ mod tests {
     }
 
     fn agent_at(root: &Path, url: &str) -> Agent {
-        let mut s = Settings::default();
-        s.sandbox = Some(true);
+        let s = Settings {
+            sandbox: Some(true),
+            ..Settings::default()
+        };
         Agent::with_client(root, s, Client::local(url, "mock"))
+    }
+
+    #[test]
+    fn the_prompt_asks_for_one_responsibility_per_function_and_file() {
+        let d = tmp("structure");
+        let a = Agent::with_client(
+            &d,
+            Settings::default(),
+            Client::local("http://127.0.0.1:1", "m"),
+        );
+        let p = a.system_prompt("split the editor");
+        assert!(
+            p.contains("one job per function"),
+            "no function-split rule: {p}"
+        );
+        assert!(
+            p.contains("one responsibility per file"),
+            "no file-split rule: {p}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -919,8 +851,10 @@ mod tests {
             "---\nname: rel\ndescription: releases\ntrigger: release\n---\nstep one\n",
         )
         .unwrap();
-        let mut s = Settings::default();
-        s.persona = Some("lead".into());
+        let s = Settings {
+            persona: Some("lead".into()),
+            ..Settings::default()
+        };
         let a = Agent::with_client(&d, s, Client::local("http://127.0.0.1:1", "m"));
         let p = a.system_prompt("cut a release");
         let ipos = p.find("you are the agent inside nana").unwrap();

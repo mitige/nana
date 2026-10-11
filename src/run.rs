@@ -21,6 +21,7 @@ pub struct Plan {
     pub label: String,
 }
 
+/// quotes one argument for the shell, so a path with spaces reaches the program whole.
 fn shell_quote(s: &str) -> String {
     if s.chars()
         .all(|c| c.is_ascii_alphanumeric() || "._-/=:@+,^%".contains(c))
@@ -31,6 +32,7 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
+/// the program and its arguments as one command line, for display.
 fn render(program: &str, args: &[String]) -> String {
     let mut out = shell_quote(program);
     for a in args {
@@ -40,6 +42,7 @@ fn render(program: &str, args: &[String]) -> String {
     out
 }
 
+/// the command line of a run, with the file and temp placeholders filled in.
 fn expanded(cmd: &Cmd, path: &Path, tmp: &Path) -> String {
     let (program, args) = langs::expand(cmd, path, tmp);
     render(&program, &args)

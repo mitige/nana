@@ -25,6 +25,7 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// Returns the lowercase name of the project kind, the word the status and the hub show.
     pub fn name(&self) -> &'static str {
         match self {
             Kind::Cargo => "cargo",
@@ -49,14 +50,17 @@ impl Kind {
 pub struct Line(pub String);
 
 impl Line {
+    /// Wraps a command line as a project line, so every command reads the same way.
     pub fn new(s: impl Into<String>) -> Self {
         Line(s.into())
     }
+    /// Hands back the command text, for running it or showing it.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
+/// Builds an optional command line from a literal, the shape the per-kind builders use for run, build, test and fmt.
 fn line(s: &str) -> Option<Line> {
     Some(Line(s.to_string()))
 }
@@ -118,6 +122,7 @@ pub fn detect(start: &Path) -> Option<Project> {
     None
 }
 
+/// Describes a .NET project from its csproj, sln or fsproj file, naming it after that file and running dotnet commands.
 fn describe(dir: &Path) -> Option<Project> {
     if let Some(entry) = first_with_ext(dir, &["csproj", "sln", "fsproj"]) {
         let name = entry
@@ -164,6 +169,7 @@ fn describe(dir: &Path) -> Option<Project> {
     None
 }
 
+/// Finds the first file of the folder with one of the given extensions, None when the folder has none or cannot be read.
 fn first_with_ext(dir: &Path, exts: &[&str]) -> Option<PathBuf> {
     let rd = std::fs::read_dir(dir).ok()?;
     for e in rd.flatten() {
@@ -177,6 +183,7 @@ fn first_with_ext(dir: &Path, exts: &[&str]) -> Option<PathBuf> {
     None
 }
 
+/// Describes a cargo project with cargo run, build, test and fmt.
 fn cargo(dir: &Path, name: String) -> Project {
     Project {
         root: dir.to_path_buf(),
@@ -306,6 +313,7 @@ fn python(dir: &Path, name: String) -> Project {
     }
 }
 
+/// Describes a go module with go run, build, test and gofmt.
 fn go(dir: &Path, name: String) -> Project {
     Project {
         root: dir.to_path_buf(),
@@ -319,6 +327,7 @@ fn go(dir: &Path, name: String) -> Project {
     }
 }
 
+/// Describes a make project: build is make, and test is offered only when the Makefile has a test target.
 fn make(dir: &Path, name: String) -> Project {
     let has_test = std::fs::read_to_string(dir.join("Makefile"))
         .map(|t| t.contains("\ntest:") || t.starts_with("test:"))
@@ -335,6 +344,7 @@ fn make(dir: &Path, name: String) -> Project {
     }
 }
 
+/// Describes a cmake project: build configures and compiles into build, test runs ctest there.
 fn cmake(dir: &Path, name: String) -> Project {
     Project {
         root: dir.to_path_buf(),
@@ -348,6 +358,7 @@ fn cmake(dir: &Path, name: String) -> Project {
     }
 }
 
+/// Describes a meson project: build sets up and compiles into build, test runs meson test there.
 fn meson(dir: &Path, name: String) -> Project {
     Project {
         root: dir.to_path_buf(),
@@ -361,6 +372,7 @@ fn meson(dir: &Path, name: String) -> Project {
     }
 }
 
+/// Describes a zig project with zig build run, build, test and fmt.
 fn zig(dir: &Path, name: String) -> Project {
     Project {
         root: dir.to_path_buf(),
@@ -374,6 +386,7 @@ fn zig(dir: &Path, name: String) -> Project {
     }
 }
 
+/// Describes a maven project with the quiet compile, package and test goals.
 fn maven(dir: &Path, name: String) -> Project {
     Project {
         root: dir.to_path_buf(),
@@ -387,6 +400,7 @@ fn maven(dir: &Path, name: String) -> Project {
     }
 }
 
+/// Describes a gradle project, using the project's gradlew wrapper when one is present, otherwise the installed gradle.
 fn gradle(dir: &Path, name: String) -> Project {
     let g = if dir.join("gradlew").exists() {
         "./gradlew"
@@ -405,6 +419,7 @@ fn gradle(dir: &Path, name: String) -> Project {
     }
 }
 
+/// Describes a docker compose project with compose up and build, and no test command.
 fn docker(dir: &Path, name: String) -> Project {
     Project {
         root: dir.to_path_buf(),

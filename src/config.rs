@@ -33,6 +33,7 @@ pub struct StyleSection {
 }
 
 impl Default for StyleSection {
+    /// the style rules a fresh config starts with, taken from the checker's own defaults.
     fn default() -> Self {
         let d = crate::check::StyleCfg::default();
         Self {
@@ -45,6 +46,7 @@ impl Default for StyleSection {
 }
 
 impl StyleSection {
+    /// the style rules of this config in the form the checker reads.
     pub fn to_cfg(&self) -> crate::check::StyleCfg {
         crate::check::StyleCfg {
             max_columns: self.max_columns,
@@ -67,16 +69,19 @@ pub fn home_dir() -> PathBuf {
     PathBuf::from(".")
 }
 
+/// the folder holding the config, from `XDG_CONFIG_HOME` or `~/.config`.
 fn dirs_config() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home_dir().join(".config"))
 }
 
+/// the file where the user config lives.
 pub fn config_path() -> PathBuf {
     dirs_config().join("nana").join("config.toml")
 }
 
+/// the folder for nana's own data, from `XDG_DATA_HOME` or `~/.local/share`.
 pub fn data_dir() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -84,6 +89,7 @@ pub fn data_dir() -> PathBuf {
         .join("nana")
 }
 
+/// reads the config; a missing or broken file gives the defaults, so the editor always starts.
 pub fn load() -> Config {
     let path = config_path();
     match std::fs::read_to_string(&path) {
@@ -105,6 +111,7 @@ pub fn save_ai_model(model: &str) {
     save_key("ai_model", model);
 }
 
+/// stores one value of the config under its key, keeping every other line as it was.
 fn save_key(key: &str, value: &str) {
     let path = config_path();
     let text = std::fs::read_to_string(&path).unwrap_or_default();

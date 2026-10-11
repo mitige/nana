@@ -58,6 +58,7 @@ impl Settings {
         s
     }
 
+    /// copies every setting that `other` sets over this one, leaving the rest as they were.
     fn merge(&mut self, other: Settings) {
         macro_rules! take {
             ($($f:ident),*) => { $( if other.$f.is_some() { self.$f = other.$f; } )* };
@@ -87,12 +88,14 @@ impl Settings {
         self.sandbox.unwrap_or(false)
     }
 
+    /// writes the settings in the user folder and hands back the path, falling back to the current folder.
     pub fn save_user(&self) -> std::io::Result<PathBuf> {
         let path = user_path().unwrap_or_else(|| PathBuf::from("nana-settings.json"));
         write(&path, self)?;
         Ok(path)
     }
 
+    /// writes the settings into the project folder and hands back the path.
     pub fn save_project(&self, root: &Path) -> std::io::Result<PathBuf> {
         let path = project_path(root);
         write(&path, self)?;
@@ -100,6 +103,7 @@ impl Settings {
     }
 }
 
+/// reads a settings file; a missing file or a broken one gives the defaults, with a warning for a broken one.
 fn read(path: &Path) -> Settings {
     match std::fs::read_to_string(path) {
         Ok(t) => serde_json::from_str(&t).unwrap_or_else(|e| {
@@ -110,6 +114,7 @@ fn read(path: &Path) -> Settings {
     }
 }
 
+/// writes the settings as pretty json, creating the folder first.
 fn write(path: &Path, s: &Settings) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

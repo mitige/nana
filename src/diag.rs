@@ -17,6 +17,7 @@ pub struct Diag {
     pub message: String,
 }
 
+/// reads a compiler severity word: `Some(true)` for an error, `Some(false)` for a warning or note, `None` for any other word.
 fn severity_of(word: &str) -> Option<bool> {
     let w = word.trim().trim_end_matches(':');
     match w {
@@ -99,180 +100,211 @@ fn head_colon(line: &str) -> Option<(String, usize, usize, &str)> {
 /// `luac: x.lua:12: msg`, `x.sh: line 12: msg`, `syntax error at x.pl line 12`,
 /// `x.rb:12: msg`, `... in x.php on line 12`.
 pub fn parse(text: &str, file: &Path) -> Vec<Diag> {
-    let mut out: Vec<Diag> = Vec::new();
-    // a "File …, line N" head that the *next* severity line belongs to
-    let mut pending: Option<(usize, usize)> = None;
-    // a rustc-style severity line waiting for its `--> path:line:col`
-    let mut pending_rustc: Option<(bool, String)> = None;
-
+    let mut scan = Scan::default();
     for raw in text.lines() {
-        let line = raw.trim_end();
-        let t = line.trim_start();
+        let t = raw.trim_end().trim_start();
         if t.is_empty() {
             continue;
         }
+        scan.line(t, file);
+    }
+    scan.finish()
+}
 
-        // ---------------------------------------------------------- rustc
+/// what the parser remembers between two lines of the compiler output.
+#[derive(Default)]
+struct Scan {
+    out: Vec<Diag>,
+    // a "File ..., line N" head that the *next* severity line belongs to
+    pending: Option<(usize, usize)>,
+    // a rustc-style severity line waiting for its `--> path:line:col`
+    pending_rustc: Option<(bool, String)>,
+}
+
+impl Scan {
+    /// the order of these tests is the order of the formats: the first match wins.
+    fn line(&mut self, t: &str, file: &Path) {
         if let Some(rest) = t.strip_prefix("--> ") {
-            if let Some((p, l, c, _)) = head_colon(rest.trim()) {
-                if let Some((is_error, msg)) = pending_rustc.take() {
-                    if belongs(&p, file) {
-                        out.push(Diag {
-                            line: l,
-                            col: c,
-                            is_error,
-                            message: msg,
-                        });
-                    }
-                }
-            }
-            continue;
+            self.rustc_anchor(rest, file);
+            return;
         }
-        if pending.is_none() {
+        if self.pending.is_none() {
             if let Some((is_error, msg)) = rustc_head(t) {
-                pending_rustc = Some((is_error, msg));
-                continue;
+                self.pending_rustc = Some((is_error, msg));
+                return;
             }
         }
-
-        // ------------------------------------------- python's `File "…", line N`
-        if let Some((name, n)) = python_file_head(t) {
-            pending = Some((n, 0));
-            let _ = name;
-            continue;
+        if let Some((_, n)) = python_file_head(t) {
+            self.pending = Some((n, 0));
+            return;
         }
+        if self.anchored_line(t, file) {
+            return;
+        }
+        if self.bare_severity(t) {
+            return;
+        }
+        self.node_anchor(t, file);
+    }
 
-        // ------------------------------------------------------- tsc: x.ts(3,5)
+    /// `-->` closes the rustc severity line that came before it.
+    fn rustc_anchor(&mut self, rest: &str, file: &Path) {
+        let Some((p, l, c, _)) = head_colon(rest.trim()) else {
+            return;
+        };
+        let Some((is_error, message)) = self.pending_rustc.take() else {
+            return;
+        };
+        if belongs(&p, file) {
+            self.out.push(Diag {
+                line: l,
+                col: c,
+                is_error,
+                message,
+            });
+        }
+    }
+
+    /// lines that carry their own path and line: tsc, php, perl, bash, and the
+    /// generic `path:line:col: severity`. returns true when one of them took the line.
+    fn anchored_line(&mut self, t: &str, file: &Path) -> bool {
         if let Some((p, l, c, tail)) = paren_head(t) {
-            let sev = tail.split_whitespace().next().and_then(severity_of);
-            if let Some(is_error) = sev {
+            if let Some(is_error) = tail.split_whitespace().next().and_then(severity_of) {
                 if belongs(&p, file) {
-                    out.push(Diag {
+                    self.out.push(Diag {
                         line: l,
                         col: c,
                         is_error,
                         message: strip_code(tail),
                     });
                 }
-                pending = None;
-                continue;
+                self.pending = None;
+                return true;
             }
         }
-
-        // ------------------------------------------------------- php / perl tails
-        if let Some((n, msg)) = php_tail(t) {
-            out.push(Diag {
+        if let Some((n, message)) = php_tail(t) {
+            self.out.push(Diag {
                 line: n,
                 col: 0,
                 is_error: true,
-                message: msg,
+                message,
             });
-            pending = None;
-            continue;
+            self.pending = None;
+            return true;
         }
-        if let Some((n, msg)) = perl_tail(t) {
-            out.push(Diag {
+        if let Some((n, message)) = perl_tail(t) {
+            self.out.push(Diag {
                 line: n,
                 col: 0,
                 is_error: true,
-                message: msg,
+                message,
             });
-            pending = None;
-            continue;
+            self.pending = None;
+            return true;
         }
-        // ------------------------------------------------- bash: `x.sh: line 12: …`
-        if let Some((p, n, msg)) = bash_line_head(t) {
+        if let Some((p, n, message)) = bash_line_head(t) {
             if belongs(&p, file) {
-                out.push(Diag {
+                self.out.push(Diag {
                     line: n,
                     col: 0,
                     is_error: true,
-                    message: msg,
-                });
-            }
-            pending = None;
-            continue;
-        }
-
-        // ------------------------------------------------------- generic head
-        if let Some((p, l, c, tail)) = head_colon(t) {
-            let tail_t = tail.trim_start();
-            let word = tail_t.split(':').next().unwrap_or("").trim();
-            let sev = severity_of(word);
-            let message = if sev.is_some() {
-                tail_t[word.len()..]
-                    .trim_start_matches(':')
-                    .trim()
-                    .to_string()
-            } else {
-                tail_t.trim().to_string()
-            };
-            // tool prefixes such as `luac: x.lua:12: msg` put a word before the path
-            let (path, cleaned) = split_tool_prefix(&p);
-            let _ = cleaned;
-            if belongs(&path, file) {
-                out.push(Diag {
-                    line: l,
-                    col: c,
-                    is_error: sev.unwrap_or(true),
                     message,
                 });
-                pending = None;
-                continue;
             }
+            self.pending = None;
+            return true;
         }
+        self.generic_head(t, file)
+    }
 
-        // ------------------------------------------- bare severity line
+    /// takes a `file:line:col: severity: message` line; returns `false` when the line is not that shape, so the caller tries the next form.
+    fn generic_head(&mut self, t: &str, file: &Path) -> bool {
+        let Some((p, l, c, tail)) = head_colon(t) else {
+            return false;
+        };
+        let tail_t = tail.trim_start();
+        let word = tail_t.split(':').next().unwrap_or("").trim();
+        let sev = severity_of(word);
+        let message = if sev.is_some() {
+            tail_t[word.len()..]
+                .trim_start_matches(':')
+                .trim()
+                .to_string()
+        } else {
+            tail_t.trim().to_string()
+        };
+        // tool prefixes such as `luac: x.lua:12: msg` put a word before the path
+        let (path, _) = split_tool_prefix(&p);
+        if !belongs(&path, file) {
+            return false;
+        }
+        self.out.push(Diag {
+            line: l,
+            col: c,
+            is_error: sev.unwrap_or(true),
+            message,
+        });
+        self.pending = None;
+        true
+    }
+
+    /// a bare `error: msg` with no path. node prints `SyntaxError: ...` a few
+    /// lines after its `x.js:12` anchor, so the anchor wins when there is one.
+    fn bare_severity(&mut self, t: &str) -> bool {
         let word = t.split(':').next().unwrap_or("").trim();
-        if let Some(is_error) = severity_of(word) {
-            let msg = t[word.len()..].trim_start_matches(':').trim().to_string();
-            // node prints `SyntaxError: …` a couple of lines after `x.js:12`
-            if let Some((l, c)) = pending.take() {
-                out.push(Diag {
-                    line: l,
-                    col: c,
-                    is_error,
-                    message: msg,
-                });
-                continue;
-            }
-            if let Some(last) = out.last() {
-                // a bare severity with no anchor: attach to the last known line
-                out.push(Diag {
-                    line: last.line,
-                    col: 0,
-                    is_error,
-                    message: msg,
-                });
-            }
-            continue;
+        let Some(is_error) = severity_of(word) else {
+            return false;
+        };
+        let message = t[word.len()..].trim_start_matches(':').trim().to_string();
+        if let Some((line, col)) = self.pending.take() {
+            self.out.push(Diag {
+                line,
+                col,
+                is_error,
+                message,
+            });
+        } else if let Some(line) = self.out.last().map(|d| d.line) {
+            // no anchor at all: attach to the last known line
+            self.out.push(Diag {
+                line,
+                col: 0,
+                is_error,
+                message,
+            });
         }
+        true
+    }
 
-        // ------------------------------------------- node's `x.js:12` anchor
+    /// remembers a `-->` style anchor line that belongs to this file, so a message printed before it gets its position.
+    fn node_anchor(&mut self, t: &str, file: &Path) {
         if let Some((p, l, c, tail)) = head_colon(t) {
             if tail.trim().is_empty() && belongs(&p, file) {
-                pending = Some((l, c));
+                self.pending = Some((l, c));
             }
         } else if let Some((p, l, c)) = trailing_anchor(t) {
             if belongs(&p, file) {
-                pending = Some((l, c));
+                self.pending = Some((l, c));
             }
         }
     }
 
-    // a rustc severity that never got its `-->`: keep it on line 1 rather than
-    // losing it — a visible diagnostic beats a silent one
-    if let Some((is_error, message)) = pending_rustc {
-        out.push(Diag {
-            line: 1,
-            col: 0,
-            is_error,
-            message,
-        });
+    /// the diagnostics found so far. A rustc severity with no `-->` anchor is kept on line 1, because a visible diagnostic beats a silent one.
+    fn finish(mut self) -> Vec<Diag> {
+        // a rustc severity that never got its `-->`: keep it on line 1 rather than
+        // losing it — a visible diagnostic beats a silent one
+        if let Some((is_error, message)) = self.pending_rustc {
+            self.out.push(Diag {
+                line: 1,
+                col: 0,
+                is_error,
+                message,
+            });
+        }
+        dedup(self.out)
     }
-    dedup(out)
 }
 
+/// sorts diagnostics by position and drops the exact duplicates that a tool prints twice.
 fn dedup(mut v: Vec<Diag>) -> Vec<Diag> {
     v.sort_by(|a, b| (a.line, a.col, &a.message).cmp(&(b.line, b.col, &b.message)));
     v.dedup();

@@ -13,10 +13,12 @@ use crate::agent::Agent;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// Returns the knowledge folder of a project, under its hidden nana folder, so the knowledge never mixes with the project's own files.
 fn dir(root: &Path) -> PathBuf {
     root.join(".nana").join("knowledge")
 }
 
+/// Returns the knowledge folder of a project for callers outside this module, the same place the pages are written to.
 pub fn root_of(root: &Path) -> PathBuf {
     dir(root)
 }
@@ -29,6 +31,7 @@ pub struct Page {
     pub lines: usize,
 }
 
+/// Returns the file name without its extension, the name a page is listed and linked by.
 fn parse_name(path: &Path) -> String {
     path.file_stem()
         .and_then(|s| s.to_str())
@@ -36,6 +39,7 @@ fn parse_name(path: &Path) -> String {
         .to_string()
 }
 
+/// Returns the title of a page: its first markdown heading, or its file name when it has none or cannot be read.
 fn title_of(path: &Path) -> String {
     std::fs::read_to_string(path)
         .ok()
@@ -73,6 +77,7 @@ pub fn list(root: &Path) -> Vec<Page> {
     out
 }
 
+/// Lists the audit pages, the reports kept in the audit subfolder, with their title and lines, and an empty list when that folder is missing.
 pub fn audit_list(root: &Path) -> Vec<Page> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir(root).join("audit")) else {
@@ -96,15 +101,18 @@ pub fn audit_list(root: &Path) -> Vec<Page> {
     out
 }
 
+/// Reads a knowledge page by name, refusing a name that leaves the knowledge folder, with the file path in the error.
 pub fn read(root: &Path, name: &str) -> Result<String, String> {
     let path = safe_path(&dir(root), name)?;
     std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Writes a knowledge page by name in the knowledge folder and returns the path written.
 pub fn write(root: &Path, name: &str, body: &str) -> Result<PathBuf, String> {
     write_in(&dir(root), name, body)
 }
 
+/// Writes a page in the given folder: it creates the folders, trims trailing blank lines and ends the file with one newline.
 fn write_in(base: &Path, name: &str, body: &str) -> Result<PathBuf, String> {
     let path = safe_path(base, name)?;
     if let Some(parent) = path.parent() {
@@ -133,6 +141,7 @@ pub struct Hit {
     pub text: String,
 }
 
+/// Searches every knowledge and audit page for a text, ignoring case, and returns each matching line with its page and line number.
 pub fn search(root: &Path, needle: &str) -> Vec<Hit> {
     let needle = needle.to_lowercase();
     let mut out = Vec::new();
@@ -315,6 +324,7 @@ pub fn parse_dream(text: &str) -> Result<DreamPlan, String> {
     Ok(DreamPlan { pages, audit })
 }
 
+/// Returns the first line of a text, cut to 100 characters and marked with dots, so a long line still fits the list.
 fn first_line(s: &str) -> String {
     let l = s.lines().next().unwrap_or_default();
     if l.chars().count() > 100 {

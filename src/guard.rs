@@ -22,10 +22,12 @@ pub fn in_worker() -> bool {
 
 /// what a worker sends back: its own result, or the text of its panic.
 pub trait FromPanic {
+    /// builds the value a crashed worker hands back from the panic text.
     fn from_panic(message: String) -> Self;
 }
 
 impl FromPanic for crate::check::Report {
+    /// the report a crashed check hands back: the panic text becomes its note, so the editor shows it instead of dying.
     fn from_panic(message: String) -> Self {
         crate::check::Report {
             note: message,
@@ -35,12 +37,14 @@ impl FromPanic for crate::check::Report {
 }
 
 impl<T> FromPanic for Result<T, String> {
+    /// the result a crashed worker hands back: the panic text becomes the error, so the caller can show it.
     fn from_panic(message: String) -> Self {
         Err(message)
     }
 }
 
 impl FromPanic for crate::agent::Event {
+    /// the event a crashed agent run sends: the panic text becomes an error event on the agent card.
     fn from_panic(message: String) -> Self {
         crate::agent::Event::Error(message)
     }
@@ -93,6 +97,7 @@ fn install_hook() {
     });
 }
 
+/// turns a panic payload into a readable line, whatever type the panic carried.
 fn panic_message(payload: &(dyn Any + Send)) -> String {
     let text = payload
         .downcast_ref::<&str>()

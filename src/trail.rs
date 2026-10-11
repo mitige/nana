@@ -21,6 +21,7 @@ pub enum Lane {
 impl Lane {
     pub const ALL: [Lane; 4] = [Lane::Tool, Lane::Result, Lane::File, Lane::Say];
 
+    /// the stable word for this lane, used in ids and in saved trails.
     pub fn id(self) -> &'static str {
         match self {
             Lane::Tool => "tool",

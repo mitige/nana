@@ -42,6 +42,7 @@ fn dirs(root: &Path, extra: &[String]) -> Vec<PathBuf> {
     out
 }
 
+/// finds every skill under the given roots, skipping folders that cannot be read, so one bad folder never hides the rest.
 pub fn discover(root: &Path, extra: &[String]) -> Vec<Skill> {
     let mut out: Vec<Skill> = Vec::new();
     for dir in dirs(root, extra) {
@@ -90,6 +91,7 @@ pub fn matching<'a>(skills: &'a [Skill], request: &str) -> Vec<&'a Skill> {
     skills.iter().filter(|s| s.matches(request)).collect()
 }
 
+/// reads one skill file; the folder name is the fallback title when the file names none. `None` when it cannot be read.
 fn parse(path: &Path) -> Option<Skill> {
     let text = std::fs::read_to_string(path).ok()?;
     let fallback = path

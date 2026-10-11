@@ -162,6 +162,7 @@ pub fn dsh_has(name: &str) -> bool {
     key_from_dsh(name).is_some()
 }
 
+/// Finds a provider by its id, None when the id names no known provider.
 pub fn by_id(id: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|p| p.id == id)
 }
@@ -193,6 +194,7 @@ pub enum Role {
 }
 
 impl Role {
+    /// Returns the role word the wire format of the providers expects.
     fn wire(&self) -> &'static str {
         match self {
             Role::System => "system",
@@ -215,6 +217,7 @@ pub struct Msg {
 }
 
 impl Msg {
+    /// Builds a user message with no tool call, the plain text the person typed.
     pub fn user(text: impl Into<String>) -> Msg {
         Msg {
             role: Role::User,
@@ -223,6 +226,7 @@ impl Msg {
             tool_call_id: None,
         }
     }
+    /// Builds the tool result message that answers one tool call, identified by its id.
     pub fn tool(id: &str, text: impl Into<String>) -> Msg {
         Msg {
             role: Role::Tool,
@@ -297,7 +301,7 @@ impl Client {
         let mut api_key = key_env
             .as_deref()
             .and_then(key_from_env)
-            .or_else(|| key_env.as_deref().and_then(|e| key_from_dsh(e)));
+            .or_else(|| key_env.as_deref().and_then(key_from_dsh));
         if api_key.is_none() && provider.id == "dashscope" {
             api_key = key_from_dsh("OPP_API_KEY").or_else(|| key_from_env("OPP_API_KEY"));
         }
@@ -333,6 +337,7 @@ impl Client {
         self
     }
 
+    /// Tells whether the client holds an api key, so the caller can say a key is missing before any call.
     pub fn has_key(&self) -> bool {
         self.api_key.is_some()
     }
@@ -370,45 +375,15 @@ impl Client {
     }
 
     // ------------------------------------------------------------ openai shape
+    /// Sends one chat turn in the openai shape and reads the answer back. The
+    /// shape is also spoken by every local server, so it is the common path.
     fn chat_openai(
         &self,
         system: &str,
         messages: &[Msg],
         tools: &[ToolSpec],
     ) -> Result<Reply, String> {
-        let mut wire: Vec<Value> = Vec::new();
-        if !system.is_empty() {
-            wire.push(json!({"role": "system", "content": system}));
-        }
-        for m in messages {
-            match m.role {
-                Role::Assistant if !m.tool_calls.is_empty() => {
-                    let calls: Vec<Value> = m
-                        .tool_calls
-                        .iter()
-                        .map(|c| {
-                            json!({
-                                "id": c.id,
-                                "type": "function",
-                                "function": {"name": c.name, "arguments": c.args.to_string()}
-                            })
-                        })
-                        .collect();
-                    wire.push(json!({
-                        "role": "assistant",
-                        "content": m.content,
-                        "tool_calls": calls
-                    }));
-                }
-                Role::Tool => wire.push(json!({
-                    "role": "tool",
-                    "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
-                    "content": m.content
-                })),
-                other => wire.push(json!({"role": other.wire(), "content": m.content})),
-            }
-        }
-        let mut body = json!({"model": self.model, "messages": wire});
+        let mut body = json!({"model": self.model, "messages": openai_messages(system, messages)});
         if let Some(t) = self.temperature {
             body["temperature"] = json!(t);
         }
@@ -416,13 +391,7 @@ impl Client {
             body["max_tokens"] = json!(m);
         }
         if !tools.is_empty() {
-            body["tools"] = json!(tools
-                .iter()
-                .map(|t| json!({
-                    "type": "function",
-                    "function": {"name": t.name, "description": t.description, "parameters": t.parameters}
-                }))
-                .collect::<Vec<_>>());
+            body["tools"] = openai_tools(tools);
             body["tool_choice"] = json!("auto");
         }
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
@@ -434,89 +403,22 @@ impl Client {
             req = req.header("Authorization", &format!("Bearer {k}"));
         }
         let value = send_json!(req, &body);
-        let message = value
-            .pointer("/choices/0/message")
-            .cloned()
-            .unwrap_or(Value::Null);
-        let text = message
-            .get("content")
-            .and_then(|c| c.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let mut calls = Vec::new();
-        if let Some(arr) = message.get("tool_calls").and_then(|c| c.as_array()) {
-            for (i, c) in arr.iter().enumerate() {
-                let name = c
-                    .pointer("/function/name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let raw = c
-                    .pointer("/function/arguments")
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("{}");
-                calls.push(ToolCall {
-                    id: c
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                        .unwrap_or_else(|| format!("call_{i}")),
-                    name,
-                    args: serde_json::from_str(raw).unwrap_or_else(|_| json!({})),
-                });
-            }
-        }
-        Ok(Reply {
-            text,
-            tool_calls: calls,
-            prompt_tokens: value
-                .pointer("/usage/prompt_tokens")
-                .and_then(|v| v.as_u64()),
-            completion_tokens: value
-                .pointer("/usage/completion_tokens")
-                .and_then(|v| v.as_u64()),
-        })
+        Ok(openai_reply(&value))
     }
 
     // -------------------------------------------------------- anthropic shape
+    /// Sends one chat turn in the anthropic shape: the system prompt goes apart
+    /// from the messages, and the answer's text and tool_use blocks are read back.
     fn chat_anthropic(
         &self,
         system: &str,
         messages: &[Msg],
         tools: &[ToolSpec],
     ) -> Result<Reply, String> {
-        let mut wire: Vec<Value> = Vec::new();
-        for m in messages {
-            match m.role {
-                Role::System => {}
-                Role::Assistant if !m.tool_calls.is_empty() => {
-                    let mut blocks: Vec<Value> = Vec::new();
-                    if !m.content.is_empty() {
-                        blocks.push(json!({"type": "text", "text": m.content}));
-                    }
-                    for c in &m.tool_calls {
-                        blocks.push(json!({
-                            "type": "tool_use", "id": c.id, "name": c.name, "input": c.args
-                        }));
-                    }
-                    wire.push(json!({"role": "assistant", "content": blocks}));
-                }
-                Role::Tool => wire.push(json!({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
-                        "content": m.content
-                    }]
-                })),
-                Role::User => wire.push(json!({"role": "user", "content": m.content})),
-                Role::Assistant => wire.push(json!({"role": "assistant", "content": m.content})),
-            }
-        }
         let mut body = json!({
             "model": self.model,
             "max_tokens": self.max_tokens.unwrap_or(8192),
-            "messages": wire
+            "messages": anthropic_messages(messages)
         });
         if !system.is_empty() {
             body["system"] = json!(system);
@@ -525,12 +427,7 @@ impl Client {
             body["temperature"] = json!(t);
         }
         if !tools.is_empty() {
-            body["tools"] = json!(tools
-                .iter()
-                .map(|t| json!({
-                    "name": t.name, "description": t.description, "input_schema": t.parameters
-                }))
-                .collect::<Vec<_>>());
+            body["tools"] = anthropic_tools(tools);
         }
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let mut req = self
@@ -542,46 +439,11 @@ impl Client {
             req = req.header("x-api-key", k);
         }
         let value = send_json!(req, &body);
-        let mut text = String::new();
-        let mut calls = Vec::new();
-        if let Some(blocks) = value.get("content").and_then(|c| c.as_array()) {
-            for (i, b) in blocks.iter().enumerate() {
-                match b.get("type").and_then(|t| t.as_str()) {
-                    Some("text") => {
-                        if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
-                            text.push_str(t);
-                        }
-                    }
-                    Some("tool_use") => calls.push(ToolCall {
-                        id: b
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string)
-                            .unwrap_or_else(|| format!("toolu_{i}")),
-                        name: b
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        args: b.get("input").cloned().unwrap_or_else(|| json!({})),
-                    }),
-                    _ => {}
-                }
-            }
-        }
-        Ok(Reply {
-            text,
-            tool_calls: calls,
-            prompt_tokens: value
-                .pointer("/usage/input_tokens")
-                .and_then(|v| v.as_u64()),
-            completion_tokens: value
-                .pointer("/usage/output_tokens")
-                .and_then(|v| v.as_u64()),
-        })
+        Ok(anthropic_reply(&value))
     }
 
     // ----------------------------------------------------------- gemini shape
+    /// Sends a conversation to the gemini generateContent endpoint, mapping tool results to function responses, and returns the reply.
     fn chat_gemini(
         &self,
         system: &str,
@@ -684,7 +546,190 @@ impl Client {
 }
 
 /// the key is never printed, not even by a `{:?}` of the client.
+/// Converts the conversation to the openai wire shape: the system prompt first,
+/// then one message per turn, with tool calls and tool results in their own form.
+fn openai_messages(system: &str, messages: &[Msg]) -> Vec<Value> {
+    let mut wire: Vec<Value> = Vec::new();
+    if !system.is_empty() {
+        wire.push(json!({"role": "system", "content": system}));
+    }
+    for m in messages {
+        match m.role {
+            Role::Assistant if !m.tool_calls.is_empty() => {
+                let calls: Vec<Value> = m
+                    .tool_calls
+                    .iter()
+                    .map(|c| {
+                        json!({
+                            "id": c.id,
+                            "type": "function",
+                            "function": {"name": c.name, "arguments": c.args.to_string()}
+                        })
+                    })
+                    .collect();
+                wire.push(json!({
+                    "role": "assistant",
+                    "content": m.content,
+                    "tool_calls": calls
+                }));
+            }
+            Role::Tool => wire.push(json!({
+                "role": "tool",
+                "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
+                "content": m.content
+            })),
+            other => wire.push(json!({"role": other.wire(), "content": m.content})),
+        }
+    }
+    wire
+}
+
+/// Declares the tools in the openai function shape, as one array.
+fn openai_tools(tools: &[ToolSpec]) -> Value {
+    json!(tools
+        .iter()
+        .map(|t| json!({
+            "type": "function",
+            "function": {"name": t.name, "description": t.description, "parameters": t.parameters}
+        }))
+        .collect::<Vec<_>>())
+}
+
+/// Reads an openai answer: the first choice's text, its tool calls (with a
+/// generated id when the server sent none) and the token usage.
+fn openai_reply(value: &Value) -> Reply {
+    let message = value
+        .pointer("/choices/0/message")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let text = message
+        .get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let mut calls = Vec::new();
+    if let Some(arr) = message.get("tool_calls").and_then(|c| c.as_array()) {
+        for (i, c) in arr.iter().enumerate() {
+            let name = c
+                .pointer("/function/name")
+                .and_then(|n| n.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let raw = c
+                .pointer("/function/arguments")
+                .and_then(|a| a.as_str())
+                .unwrap_or("{}");
+            calls.push(ToolCall {
+                id: c
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("call_{i}")),
+                name,
+                args: serde_json::from_str(raw).unwrap_or_else(|_| json!({})),
+            });
+        }
+    }
+    Reply {
+        text,
+        tool_calls: calls,
+        prompt_tokens: value
+            .pointer("/usage/prompt_tokens")
+            .and_then(|v| v.as_u64()),
+        completion_tokens: value
+            .pointer("/usage/completion_tokens")
+            .and_then(|v| v.as_u64()),
+    }
+}
+
+/// Converts the conversation to the anthropic wire shape. The system turns are
+/// dropped (they travel apart), and tool calls and results become content blocks.
+fn anthropic_messages(messages: &[Msg]) -> Vec<Value> {
+    let mut wire: Vec<Value> = Vec::new();
+    for m in messages {
+        match m.role {
+            Role::System => {}
+            Role::Assistant if !m.tool_calls.is_empty() => {
+                let mut blocks: Vec<Value> = Vec::new();
+                if !m.content.is_empty() {
+                    blocks.push(json!({"type": "text", "text": m.content}));
+                }
+                for c in &m.tool_calls {
+                    blocks.push(json!({
+                        "type": "tool_use", "id": c.id, "name": c.name, "input": c.args
+                    }));
+                }
+                wire.push(json!({"role": "assistant", "content": blocks}));
+            }
+            Role::Tool => wire.push(json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                    "content": m.content
+                }]
+            })),
+            Role::User => wire.push(json!({"role": "user", "content": m.content})),
+            Role::Assistant => wire.push(json!({"role": "assistant", "content": m.content})),
+        }
+    }
+    wire
+}
+
+/// Declares the tools in the anthropic shape, where the schema is `input_schema`.
+fn anthropic_tools(tools: &[ToolSpec]) -> Value {
+    json!(tools
+        .iter()
+        .map(|t| json!({
+            "name": t.name, "description": t.description, "input_schema": t.parameters
+        }))
+        .collect::<Vec<_>>())
+}
+
+/// Reads an anthropic answer: the text blocks joined, the tool_use blocks as
+/// tool calls (with a generated id when missing) and the token usage.
+fn anthropic_reply(value: &Value) -> Reply {
+    let mut text = String::new();
+    let mut calls = Vec::new();
+    if let Some(blocks) = value.get("content").and_then(|c| c.as_array()) {
+        for (i, b) in blocks.iter().enumerate() {
+            match b.get("type").and_then(|t| t.as_str()) {
+                Some("text") => {
+                    if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
+                        text.push_str(t);
+                    }
+                }
+                Some("tool_use") => calls.push(ToolCall {
+                    id: b
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("toolu_{i}")),
+                    name: b
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    args: b.get("input").cloned().unwrap_or_else(|| json!({})),
+                }),
+                _ => {}
+            }
+        }
+    }
+    Reply {
+        text,
+        tool_calls: calls,
+        prompt_tokens: value
+            .pointer("/usage/input_tokens")
+            .and_then(|v| v.as_u64()),
+        completion_tokens: value
+            .pointer("/usage/output_tokens")
+            .and_then(|v| v.as_u64()),
+    }
+}
+
 impl std::fmt::Debug for Client {
+    /// Prints the client without its api key, which is replaced by three stars so a debug log never leaks the secret.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Client")
             .field("provider", &self.provider.id)
@@ -695,6 +740,7 @@ impl std::fmt::Debug for Client {
     }
 }
 
+/// Reads an api key from an environment variable, None when it is unset or blank.
 fn key_from_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|k| !k.trim().is_empty())
 }
@@ -908,9 +954,11 @@ mod tests {
     fn a_missing_key_is_explained() {
         let d = std::env::temp_dir().join(format!("nana-prov-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&d);
-        let mut s = Settings::default();
-        s.model = Some("claude-sonnet-4".into());
-        s.api_key_env = Some("NANA_TEST_KEY_THAT_DOES_NOT_EXIST".into());
+        let s = Settings {
+            model: Some("claude-sonnet-4".into()),
+            api_key_env: Some("NANA_TEST_KEY_THAT_DOES_NOT_EXIST".into()),
+            ..Settings::default()
+        };
         std::env::remove_var("NANA_TEST_KEY_THAT_DOES_NOT_EXIST");
         let err = Client::resolve(&s, &d).unwrap_err();
         assert!(err.contains("no api key"), "{err}");

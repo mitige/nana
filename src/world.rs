@@ -45,6 +45,7 @@ pub fn glyph(confidence: Option<Confidence>) -> char {
     }
 }
 
+/// the memory pages placed on the world map, each with its day, so the map can draw them in time order.
 pub fn nodes(root: &Path) -> Vec<Node> {
     let mut out: Vec<Node> = Memory::open(root)
         .list()
@@ -91,6 +92,7 @@ pub fn place(nodes: &[Node], columns: usize) -> Vec<Lane> {
         .collect()
 }
 
+/// the iso date of a day count, for the axis and the tooltips.
 pub fn iso(day: i64) -> String {
     iso_from_days(day)
 }
@@ -118,7 +120,7 @@ pub fn render_sweep(root: &Path, selected: Option<&crate::hub::Action>, progress
     let mut out = String::new();
     out.push_str(&format!("{:<11}{}\n", "", axis()));
     for lane in &lanes {
-        let mut row = vec!['┄'; COLUMNS];
+        let mut row = ['┄'; COLUMNS];
         for m in lane.marks.iter().filter(|m| m.col <= head) {
             let n = &all[m.node];
             row[m.col] = if n.stale { '◌' } else { glyph(n.confidence) };
@@ -152,7 +154,7 @@ pub fn render(root: &Path, selected: Option<&crate::hub::Action>) -> String {
     let mut out = String::new();
     out.push_str(&format!("{:<11}{}\n", "", axis()));
     for lane in &lanes {
-        let mut row = vec!['┄'; COLUMNS];
+        let mut row = ['┄'; COLUMNS];
         for m in &lane.marks {
             let n = &all[m.node];
             row[m.col] = if Some(m.node) == picked {
@@ -187,6 +189,7 @@ pub fn render(root: &Path, selected: Option<&crate::hub::Action>) -> String {
     out
 }
 
+/// the text axis under the map: `oldest` on the left, `today` on the right, the gap filled with a rule.
 fn axis() -> String {
     let left = "oldest";
     let right = "today";

@@ -56,6 +56,7 @@ pub struct StyleCfg {
 }
 
 impl Default for StyleCfg {
+    /// the style rules nana checks when the user sets none: 100 columns, no trailing blanks, no tabs, a final newline.
     fn default() -> Self {
         Self {
             max_columns: 100,
@@ -208,7 +209,6 @@ pub fn check_path(path: &Path, cfg: &StyleCfg) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn style_catches_the_usual_suspects() {
@@ -304,7 +304,7 @@ mod tests {
             program: "definitely-not-a-real-compiler-xyz",
             args: &["{file}"],
         });
-        let tmp = PathBuf::from(std::env::temp_dir());
+        let tmp = std::env::temp_dir();
         let err = run_checker(&lang, &tmp.join("x.c")).unwrap_err();
         assert!(err.contains("not found"), "{err}");
     }

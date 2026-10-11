@@ -129,6 +129,7 @@ fn scan_git(root: &Path) -> HashMap<PathBuf, char> {
 }
 
 impl Explorer {
+    /// Builds the tree rooted at the project, with the root expanded and the git marks loaded, so the first frame shows real state.
     pub fn new(root: PathBuf) -> Self {
         // absolute() : normalise sans produire le préfixe \\?\ que
         // canonicalize() collerait aux chemins sous Windows
@@ -197,6 +198,7 @@ impl Explorer {
         }
     }
 
+    /// Adds the children of one directory as rows below its parent, honouring show_hidden and recursing only into expanded folders so a closed folder costs nothing.
     fn push_rows(&mut self, dir: &Path, depth: usize) {
         for (path, is_dir) in read_sorted(dir, self.show_hidden) {
             let expanded = self.expanded.contains(&path);
@@ -253,6 +255,7 @@ impl Explorer {
             .collect();
     }
 
+    /// Collects every file under a directory, depth first, hidden entries left out, for the fuzzy filter of the tree.
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for (path, is_dir) in read_sorted(dir, false) {
             if is_dir {
@@ -265,18 +268,22 @@ impl Explorer {
 
     // -------------------------------------------------------------- état
 
+    /// Hands back the visible rows, so the renderer draws exactly what the tree holds.
     pub fn rows(&self) -> &[Row] {
         &self.rows
     }
 
+    /// Hands back the index of the selected row, which the renderer uses to highlight it.
     pub fn sel(&self) -> usize {
         self.sel
     }
 
+    /// Hands back the filter text typed so far, shown in the explorer header.
     pub fn filter(&self) -> &str {
         &self.filter
     }
 
+    /// Hands back the git status letter of a path, or None when git reports nothing for it.
     pub fn git_mark(&self, path: &Path) -> Option<char> {
         self.git.get(path).copied()
     }
@@ -297,20 +304,24 @@ impl Explorer {
 
     // -------------------------------------------------------------- actions
 
+    /// Moves the selection one row down, stopping at the last row instead of wrapping.
     pub fn move_down(&mut self) {
         if !self.rows.is_empty() {
             self.sel = (self.sel + 1).min(self.rows.len() - 1);
         }
     }
 
+    /// Moves the selection one row up, stopping at the first row.
     pub fn move_up(&mut self) {
         self.sel = self.sel.saturating_sub(1);
     }
 
+    /// Moves the selection to the first row.
     pub fn home(&mut self) {
         self.sel = 0;
     }
 
+    /// Moves the selection to the last row, doing nothing when the tree is empty.
     pub fn end(&mut self) {
         if !self.rows.is_empty() {
             self.sel = self.rows.len() - 1;
@@ -364,12 +375,14 @@ impl Explorer {
         }
     }
 
+    /// Appends a typed character to the filter, resets the selection to the top and rebuilds the rows.
     pub fn push_filter(&mut self, c: char) {
         self.filter.push(c);
         self.sel = 0;
         self.refresh();
     }
 
+    /// Removes the last filter character, resets the selection to the top and rebuilds the rows.
     pub fn pop_filter(&mut self) {
         self.filter.pop();
         self.sel = 0;
@@ -405,6 +418,7 @@ pub struct FileSearch {
 }
 
 impl FileSearch {
+    /// Builds the file search over the project, with an empty filter, so the first open lists files before any typing.
     pub fn new(root: PathBuf) -> Self {
         // absolute() : normalise sans produire le préfixe \\?\ que
         // canonicalize() collerait aux chemins sous Windows
@@ -420,6 +434,7 @@ impl FileSearch {
         fs
     }
 
+    /// Rebuilds the search results: the first 200 files when there is no filter, otherwise the files that fuzzy-match it, best score first.
     fn refresh(&mut self) {
         let mut all = Vec::new();
         Self::collect(&self.root, &mut all);
@@ -442,6 +457,7 @@ impl FileSearch {
         self.scroll = 0;
     }
 
+    /// Collects every file under a directory, depth first, skipping hidden entries, for the file search index.
     fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
         for (path, is_dir) in read_sorted(dir, false) {
             if is_dir {
@@ -460,46 +476,61 @@ impl FileSearch {
             .to_string()
     }
 
+    /// Hands back the search text typed so far.
     pub fn filter(&self) -> &str {
         &self.filter
     }
 
+    /// Hands back how many files match the search.
     pub fn len(&self) -> usize {
         self.results.len()
     }
 
+    /// Tells whether no file matches the search, so the renderer can show an empty hint.
+    pub fn is_empty(&self) -> bool {
+        self.results.is_empty()
+    }
+
+    /// Hands back the index of the selected search result.
     pub fn sel(&self) -> usize {
         self.sel
     }
 
+    /// Hands back the path of the selected search result, or None when there is none.
     pub fn sel_path(&self) -> Option<PathBuf> {
         self.results.get(self.sel).cloned()
     }
 
+    /// Appends a typed character to the search text and rebuilds the results.
     pub fn push(&mut self, c: char) {
         self.filter.push(c);
         self.refresh();
     }
 
+    /// Removes the last character of the search text and rebuilds the results.
     pub fn pop(&mut self) {
         self.filter.pop();
         self.refresh();
     }
 
+    /// Moves the selection one result down, stopping at the last result instead of wrapping.
     pub fn move_down(&mut self) {
         if !self.results.is_empty() {
             self.sel = (self.sel + 1).min(self.results.len() - 1);
         }
     }
 
+    /// Moves the selection one result up, stopping at the first result.
     pub fn move_up(&mut self) {
         self.sel = self.sel.saturating_sub(1);
     }
 
+    /// Moves the selection to the first search result.
     pub fn home(&mut self) {
         self.sel = 0;
     }
 
+    /// Moves the selection to the last search result, doing nothing when there is none.
     pub fn end(&mut self) {
         if !self.results.is_empty() {
             self.sel = self.results.len() - 1;

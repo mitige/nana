@@ -42,6 +42,7 @@ pub fn list(project_root: Option<&Path>) -> Vec<Persona> {
     list_in(project_root, None)
 }
 
+/// the personas found in the project folder and the user folder, the project one winning on a shared id.
 pub fn list_in(project_root: Option<&Path>, user_dir: Option<&Path>) -> Vec<Persona> {
     let mut out: Vec<Persona> = Vec::new();
     for dir in dirs_in(project_root, user_dir).into_iter().rev() {
@@ -63,6 +64,7 @@ pub fn list_in(project_root: Option<&Path>, user_dir: Option<&Path>) -> Vec<Pers
     out
 }
 
+/// the persona with this id from the project or the user folder, `None` when there is none.
 pub fn load(project_root: Option<&Path>, id: &str) -> Option<Persona> {
     let id = id.trim();
     list(project_root).into_iter().find(|p| p.id == id)
@@ -73,6 +75,7 @@ pub fn save(project_root: Option<&Path>, p: &Persona, project: bool) -> Result<P
     save_in(project_root, None, p, project)
 }
 
+/// writes a persona into the chosen folder and hands back the file path; the id is checked first so no path escapes its folder.
 pub fn save_in(
     project_root: Option<&Path>,
     user_dir: Option<&Path>,
@@ -108,10 +111,12 @@ pub fn save_in(
     Ok(path)
 }
 
+/// removes a persona from the project and the user folder.
 pub fn delete(project_root: Option<&Path>, id: &str) -> Result<(), String> {
     delete_in(project_root, None, id)
 }
 
+/// removes a persona from the given folders; errors when the id is not a plain name or no file exists.
 pub fn delete_in(
     project_root: Option<&Path>,
     user_dir: Option<&Path>,
@@ -127,6 +132,7 @@ pub fn delete_in(
     Err(format!("no persona « {id} »"))
 }
 
+/// turns a persona name into a safe file stem; refuses an empty name or one that tries to leave its folder.
 fn sanitize(id: &str) -> Result<String, String> {
     let clean = id.trim().to_lowercase().replace(' ', "-");
     if clean.is_empty() {

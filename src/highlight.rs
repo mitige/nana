@@ -30,6 +30,7 @@ static EDITOR_THEME: LazyLock<Theme> = LazyLock::new(|| {
     })
 });
 
+/// the C syntax definition, looked up once by extension; the bundled set always has it.
 fn c_syntax() -> &'static SyntaxReference {
     SYNTAXES
         .find_syntax_by_extension("c")
@@ -85,6 +86,7 @@ pub fn highlight_code_doc(code: &str, ext: &str) -> Vec<Vec<(Style, String)>> {
     highlight_with_theme(code, ext, &THEME)
 }
 
+/// colours each line of the code with the given theme; a line the parser rejects is kept plain rather than dropped.
 fn highlight_with_theme(code: &str, ext: &str, theme: &Theme) -> Vec<Vec<(Style, String)>> {
     let mut hl = HighlightLines::new(syntax_for(ext), theme);
     code.lines()
