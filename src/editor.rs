@@ -21,7 +21,7 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -342,9 +342,11 @@ struct AgentPane {
     /// when the agent last produced anything: the time it took to reach the
     /// next write is the time that write lasts on screen
     last_event: std::time::Instant,
-    /// the tool call waiting for its answer, and whether its file was already
-    /// announced (a write or a read plays as the file, not as a tool action)
-    pending: Option<(String, serde_json::Value, bool)>,
+    /// the tool calls waiting for their answer, oldest first, and whether each
+    /// one's file was already announced (a write or a read plays as the file,
+    /// not as a tool action). A queue, not one slot: the agent may call a
+    /// second tool before the first one answers, and the first must still play.
+    pending: VecDeque<(String, serde_json::Value, bool)>,
     /// the transcript already wrapped to the card's width, so a frame only
     /// wraps the lines that arrived since the last one
     transcript: TranscriptRows,
@@ -447,7 +449,7 @@ impl AgentPane {
             trail: Vec::new(),
             started: std::time::Instant::now(),
             last_event: std::time::Instant::now(),
-            pending: None,
+            pending: VecDeque::new(),
             transcript: TranscriptRows::default(),
         }
     }
@@ -543,7 +545,7 @@ impl AgentPane {
                     let label = terminal_header(&name, &args);
                     self.record(crate::trail::Lane::Tool, label.clone(), true);
                     self.lines.push(("tool".into(), label));
-                    self.pending = Some((name, args, false));
+                    self.pending.push_back((name, args, false));
                 }
                 crate::agent::Event::ToolResult { name, ok, text } => {
                     self.record(
@@ -553,7 +555,9 @@ impl AgentPane {
                     );
                     // every action is played, not only the files: a tool that
                     // did not announce a file shows its call and its answer
-                    if let Some((call, args, shown)) = self.pending.take() {
+                    let answered = self.pending.iter().position(|(call, _, _)| *call == name);
+                    if let Some((call, args, shown)) = answered.and_then(|i| self.pending.remove(i))
+                    {
                         if call == name && !shown {
                             let mut text_lines = vec![terminal_header(&name, &args)];
                             text_lines.extend(text.trim().lines().map(safe_text));
@@ -564,7 +568,6 @@ impl AgentPane {
                                 col: 0,
                                 ticks: ticks_for(waited),
                                 elapsed: 0,
-                                write: false,
                             });
                         }
                     }
@@ -573,13 +576,9 @@ impl AgentPane {
                         format!("{name}: {}", safe_text(text.trim())),
                     ));
                 }
-                crate::agent::Event::File {
-                    path,
-                    content,
-                    write,
-                } => {
+                crate::agent::Event::File { path, content, .. } => {
                     self.record(crate::trail::Lane::File, path.clone(), true);
-                    if let Some(call) = &mut self.pending {
+                    if let Some(call) = self.pending.back_mut() {
                         call.2 = true;
                     }
                     self.writes.push(LiveWrite {
@@ -589,7 +588,6 @@ impl AgentPane {
                         col: 0,
                         ticks: ticks_for(waited),
                         elapsed: 0,
-                        write,
                     });
                     self.lines.push(("file".into(), safe_text(&path)));
                 }
@@ -725,7 +723,6 @@ struct AgentView {
     lines: Vec<String>,
     cy: usize,
     cx: usize,
-    write: bool,
     /// when this view was swept in: it slides in from the left over VIEW_SWEEP
     opened: Option<Instant>,
     /// the line the cursor left, and when it left it: the cursor glides from there
@@ -745,8 +742,6 @@ struct LiveWrite {
     ticks: usize,
     /// ticks played so far
     elapsed: usize,
-    /// false for a read: the buffer shows the file, it is not changed by it
-    write: bool,
 }
 
 /// the frames a write lasts: the time the agent took to produce it, in ticks.
@@ -1580,7 +1575,6 @@ impl Editor {
                 lines: Vec::new(),
                 cy: 0,
                 cx: 0,
-                write: w.write,
                 opened: Some(Instant::now()),
                 glide: None,
             };

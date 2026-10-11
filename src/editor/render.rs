@@ -176,7 +176,6 @@ pub(super) fn put_seg(
 pub(super) fn draw_box(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
-    title: &[(String, Color)],
     border: Color,
 ) -> ratatui::layout::Rect {
     if area.width < 4 || area.height < 3 {
@@ -209,26 +208,8 @@ pub(super) fn draw_box(
         .set_symbol("╯")
         .set_fg(border)
         .set_bg(bgc);
-    // haut : ╭─ titre ────╮ (titre tronqué si la boîte est étroite)
-    let mut x = area.x + 1;
-    buf[(x, area.y)].set_symbol("─").set_fg(border).set_bg(bgc);
-    x += 1;
-    let budget = (right - 2).saturating_sub(area.x + 2);
-    for (txt, color) in title {
-        for ch in txt.chars() {
-            if x >= area.x + 2 + budget {
-                break;
-            }
-            buf[(x, area.y)]
-                .set_symbol(&ch.to_string())
-                .set_fg(*color)
-                .set_bg(bgc);
-            x += 1;
-        }
-    }
-    while x < right {
+    for x in (area.x + 1)..right {
         buf[(x, area.y)].set_symbol("─").set_fg(border).set_bg(bgc);
-        x += 1;
     }
     ratatui::layout::Rect {
         x: area.x + 1,
@@ -252,12 +233,7 @@ pub(super) fn draw_welcome_float(frame: &mut Frame, area: ratatui::layout::Rect)
         width: w,
         height: h,
     };
-    let inner = draw_box(
-        frame,
-        modal,
-        &[(" n".into(), Ed::accent()), ("ana ".into(), Ed::text())],
-        border_for(true),
-    );
+    let inner = draw_box(frame, modal, border_for(true));
     let bullet = || Span::styled("● ", Style::default().fg(Ed::cyan()));
     let section = |s: &'static str| {
         Line::from(Span::styled(
@@ -372,7 +348,7 @@ pub(super) fn draw_scene(frame: &mut Frame, ed: &mut Editor) {
             ])
             .split(body_zone);
         // boîte nue : la bordure colorée + le badge suffisent au focus
-        let inner = draw_box(frame, sp[0], &[], border_for(ed.focus == Focus::Explorer));
+        let inner = draw_box(frame, sp[0], border_for(ed.focus == Focus::Explorer));
         if let Some(ex) = &mut ed.explorer {
             draw_explorer(frame, ex, inner);
         }
@@ -380,8 +356,6 @@ pub(super) fn draw_scene(frame: &mut Frame, ed: &mut Editor) {
     } else {
         body_zone
     };
-    // boîte nue — le fichier vit dans le breadcrumb et la statusline
-    let title: Vec<(String, Color)> = Vec::new();
     // le terminal prend le bas de la colonne éditeur quand il est ouvert
     let (editor_area, term_area) = if ed.term.is_some() {
         // a blank line between the editor and the terminal, so the two cards
@@ -401,7 +375,6 @@ pub(super) fn draw_scene(frame: &mut Frame, ed: &mut Editor) {
     let inner = draw_box(
         frame,
         editor_area,
-        &title,
         border_for(matches!(ed.focus, Focus::Editor | Focus::Search)),
     );
     if let Some(ta) = term_area {
@@ -710,9 +683,8 @@ pub(super) fn draw_hub(frame: &mut Frame, hub: &mut crate::hub::Hub, zone: ratat
         .split(zone);
 
     // ---- left: the sections, then the items of the current one
-    let title = format!(" {} ", hub.current().title());
     clear_area(frame, sp[0]);
-    let inner = draw_box(frame, sp[0], &[(title, Ed::cyan())], Ed::cyan());
+    let inner = draw_box(frame, sp[0], Ed::cyan());
     let mut lines: Vec<Line> = Vec::new();
     for (i, name) in crate::hub::section_titles(hub.current()).iter().enumerate() {
         let current = i == hub.section_index();
@@ -799,14 +771,8 @@ pub(super) fn draw_hub(frame: &mut Frame, hub: &mut crate::hub::Hub, zone: ratat
     }
 
     // ---- right: what the selection is
-    let hint = hub.current().hint();
     clear_area(frame, sp[2]);
-    let inner = draw_box(
-        frame,
-        sp[2],
-        &[(format!(" {hint} "), Ed::dim())],
-        Ed::gutter(),
-    );
+    let inner = draw_box(frame, sp[2], Ed::gutter());
     // while the map sweeps, the sweep's own frame is what the card shows
     let detail = match (hub.current(), hub.sweep_progress()) {
         (crate::hub::Section::World, Some(p)) => {
@@ -854,21 +820,8 @@ pub(super) fn draw_agent_view(
     let is_action = crate::editor::is_action_view(path);
     // an action is what a person would type in a terminal: no file gutter and
     // no internal window name, only the tool's own words
-    let title = if is_action {
-        let tool = path.to_string_lossy();
-        let tool = tool.rsplit(": ").next().unwrap_or("");
-        let name = if tool == "run_shell" {
-            "terminal"
-        } else {
-            tool
-        };
-        format!(" {} ", safe_text(name))
-    } else {
-        let verb = if view.write { "write" } else { "read" };
-        format!(" nana · {verb} {} ", safe_text(&path.display().to_string()))
-    };
     clear_area(frame, zone);
-    let inner = draw_box(frame, zone, &[(title, Ed::cyan())], Ed::cyan());
+    let inner = draw_box(frame, zone, Ed::cyan());
     let h = inner.height as usize;
     let start = view.cy.saturating_sub(h.saturating_sub(1));
     // the number gutter is five columns wide; an action has none
@@ -971,15 +924,7 @@ pub(super) fn draw_agent(frame: &mut Frame, pane: &mut AgentPane, zone: ratatui:
         height: h,
     };
     clear_area(frame, float);
-    let title = if pane.busy {
-        format!(" agent · {} ", pane.status)
-    } else {
-        match &pane.persona {
-            Some(p) => format!(" agent · {p} "),
-            None => " agent ".to_string(),
-        }
-    };
-    let inner = draw_box(frame, float, &[(title, Ed::cyan())], Ed::cyan());
+    let inner = draw_box(frame, float, Ed::cyan());
 
     // the prompt wraps on the card's width, one row per visual line; it may
     // take up to half the card, and its last rows stay in view
@@ -1132,8 +1077,7 @@ pub(super) fn draw_search(
         height: h,
     };
     clear_area(frame, float);
-    let title = format!(" search · {} ", fs.len());
-    let inner = draw_box(frame, float, &[(title, Ed::text())], border_for(focused));
+    let inner = draw_box(frame, float, border_for(focused));
     // prompt
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -1280,7 +1224,7 @@ pub(super) fn draw_toasts(frame: &mut Frame, ed: &mut Editor, area: ratatui::lay
             Level::Warn => ("⚠", Ed::amber()),
             Level::Info => ("ℹ", Ed::cyan()),
         };
-        let inner = draw_box(frame, rect, &[], color);
+        let inner = draw_box(frame, rect, color);
         // l'icône n'apparaît qu'une fois — sur la première ligne ; les
         // lignes de continuation s'alignent dessous, sans la répéter.
         let lines: Vec<Line> = lines_t
@@ -1358,8 +1302,7 @@ pub(super) fn draw_diagnostics(frame: &mut Frame, ed: &Editor, zone: ratatui::la
     clear_area(frame, rect);
     let any_err = items.iter().any(|(e, _)| *e);
     let border = if any_err { Ed::red() } else { Ed::amber() };
-    let title = format!(" line {} ", ed.cy + 1);
-    let inner = draw_box(frame, rect, &[(title, Ed::dim())], border);
+    let inner = draw_box(frame, rect, border);
     let lines: Vec<Line> = wrapped
         .iter()
         .map(|(is_err, msg, suite)| {
@@ -1630,7 +1573,7 @@ pub(super) fn draw_terminal(
     area: ratatui::layout::Rect,
     focused: bool,
 ) {
-    let inner = draw_box(frame, area, &[], border_for(focused));
+    let inner = draw_box(frame, area, border_for(focused));
     term.resize(inner.height, inner.width);
     let screen = term.parser.screen();
     let mut lines: Vec<Line> = Vec::with_capacity(inner.height as usize);

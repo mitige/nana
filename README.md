@@ -505,7 +505,7 @@ final_newline = true
 ## development
 
 ```sh
-cargo test        # 324 tests, no network, no fixtures to download
+cargo test        # 331 tests, no network, no fixtures to download
 cargo run         # the editor, on this repository
 cargo run -- --languages
 ```

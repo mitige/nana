@@ -986,15 +986,16 @@ mod hub_ui_tests {
             ed.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
         }
         let rows = render_rows(&mut ed, 110, 32);
-        // the two cards, found by their titles
+        // the two cards, found by what they hold: the list's selected item on
+        // the left, and the box's own message on the right
         let left = rows
             .iter()
-            .position(|r| r.contains(" memory "))
-            .expect("the left card is drawn");
+            .position(|r| r.contains("▸ memory"))
+            .expect("the left card lists its sections");
         let right = rows
             .iter()
-            .position(|r| r.contains("what this project has learned"))
-            .expect("the right card is drawn");
+            .position(|r| r.contains("(memory is empty)") || r.contains("stack"))
+            .expect("the right card shows its content");
         let bottom = rows
             .iter()
             .position(|r| r.trim_start().starts_with('╰'))
@@ -1038,15 +1039,13 @@ mod hub_ui_tests {
         let mut ed = editor_at(&d);
         ed.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
         let rows = render_rows(&mut ed, 110, 32);
-        assert!(rows.iter().any(|r| r.contains(" memory ")), "the left card");
         assert!(
-            rows.iter()
-                .any(|r| r.contains("what this project has learned")),
-            "the right card, with its hint"
+            rows.iter().any(|r| r.contains("▸ memory")),
+            "the left card lists its sections"
         );
         assert!(
             rows.iter().any(|r| r.contains("empty")),
-            "and it says the box is empty"
+            "the right card says the box is empty"
         );
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -1054,6 +1053,11 @@ mod hub_ui_tests {
 
 #[cfg(test)]
 mod float_tests {
+    /// a card has a top edge: its corners sit on one row, with no title in it.
+    fn has_card_top(text: &str) -> bool {
+        text.lines().any(|r| r.contains('╭') && r.contains('╮'))
+    }
+
     use super::*;
 
     /// the ide stays on screen while the agent works: the explorer and the
@@ -1070,7 +1074,7 @@ mod float_tests {
         ed.modified = true;
         ed.agent_pane = Some(AgentPane::new());
         let text = render_text(&mut ed, 160, 40);
-        assert!(text.contains("╭─ agent"), "the card is drawn:\n{text}");
+        assert!(has_card_top(&text), "the card is drawn:\n{text}");
         assert!(
             text.contains("VISIBLE_LINE_0_STAYS_ON_SCREEN"),
             "the ide is drawn while the agent works:\n{text}"
@@ -1141,7 +1145,6 @@ mod float_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: true,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -1150,14 +1153,10 @@ mod float_tests {
         }
         std::thread::sleep(VIEW_SWEEP);
         let text = render_text(&mut ed, 160, 40);
-        assert!(text.contains("╭─ agent"), "the card is drawn:\n{text}");
+        assert!(has_card_top(&text), "the card is drawn:\n{text}");
         assert!(
             text.contains("fn behind_the_card"),
             "the write plays behind the card:\n{text}"
-        );
-        assert!(
-            text.contains("write src/lib.rs"),
-            "the view names the file it writes:\n{text}"
         );
     }
 
@@ -1174,7 +1173,7 @@ mod float_tests {
         ed.focus = Focus::Search;
         ed.search = Some(FileSearch::new(std::path::PathBuf::from(".")));
         let text = render_text(&mut ed, 100, 30);
-        assert!(text.contains("search"), "the search is drawn");
+        assert!(text.contains("❯"), "the search prompt is drawn");
         assert!(
             !text.contains("SECRET_LINE"),
             "the ide shows around the search:\n{text}"
@@ -1206,7 +1205,7 @@ mod float_tests {
         });
         ed.agent_pane = Some(pane);
         let text = render_text(&mut ed, 160, 40);
-        assert!(text.contains("╭─ agent"), "the card is drawn");
+        assert!(has_card_top(&text), "the card is drawn");
         assert!(
             text.contains("SECRET_LINE_0_STAYS_VISIBLE"),
             "the ide is drawn behind the card:\n{text}"
@@ -1725,7 +1724,7 @@ mod diag_tests {
             text.contains("trailing whitespace"),
             "the style finding too"
         );
-        assert!(text.contains("line 1"), "le titre porte la ligne");
+        assert!(text.contains("int x = ;"), "the line is in the text");
     }
 
     /// La statusline segmentée : badge de focus, position, progression.
@@ -1964,7 +1963,6 @@ mod live_write_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: true,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -2011,7 +2009,6 @@ mod live_write_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: true,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -2054,7 +2051,6 @@ mod live_write_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: false,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -2085,28 +2081,6 @@ mod live_write_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// the agent's view says whether it is writing the file or reading it, so
-    /// the same lines never look like an edit when they are only a read.
-    #[test]
-    fn the_agent_view_names_a_read_apart_from_a_write() {
-        let mut ed = Editor::open(None).unwrap();
-        ed.agent_pane = Some(AgentPane::new());
-        ed.agent_view = AgentView {
-            path: Some(PathBuf::from("notes.txt")),
-            lines: vec!["alpha".into()],
-            cy: 0,
-            cx: 0,
-            write: false,
-            opened: None,
-            glide: None,
-        };
-        let text = render_text(&mut ed, 160, 40);
-        assert!(text.contains("read"), "a read is named:\n{text}");
-        ed.agent_view.write = true;
-        let text = render_text(&mut ed, 160, 40);
-        assert!(text.contains("write"), "a write is named:\n{text}");
-    }
-
     /// the user's unsaved work is never replaced by something the agent read.
     #[test]
     fn a_read_does_not_replace_unsaved_work() {
@@ -2123,7 +2097,6 @@ mod live_write_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: false,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -2201,7 +2174,6 @@ mod agent_view_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: true,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -2212,6 +2184,45 @@ mod agent_view_tests {
             screen.iter().any(|r| r.starts_with('╰')),
             "the view has no bottom border on screen:\n{}",
             screen.join("\n")
+        );
+    }
+
+    /// two shell commands in a row are both played: the second call must not
+    /// erase the first one before its answer comes back.
+    #[test]
+    fn a_shell_command_is_not_skipped_when_another_follows() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        let (tx, rx) = channel();
+        pane.rx = Some(rx);
+        tx.send(crate::agent::Event::ToolCall {
+            name: "run_shell".into(),
+            args: serde_json::json!({"command": "ls"}),
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::ToolCall {
+            name: "run_shell".into(),
+            args: serde_json::json!({"command": "cargo test"}),
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::ToolResult {
+            name: "run_shell".into(),
+            ok: true,
+            text: "a\nb".into(),
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::ToolResult {
+            name: "run_shell".into(),
+            ok: true,
+            text: "test result: ok".into(),
+        })
+        .unwrap();
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        assert_eq!(
+            ed.live.len(),
+            2,
+            "both shell commands must be played, the first one is not skipped"
         );
     }
 
@@ -2346,7 +2357,6 @@ mod agent_view_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: true,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -2374,7 +2384,6 @@ mod agent_view_tests {
             col: 0,
             ticks: 5,
             elapsed: 0,
-            write: true,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -2407,7 +2416,6 @@ mod agent_view_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: true,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -2438,7 +2446,6 @@ mod agent_view_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: true,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -2466,7 +2473,6 @@ mod agent_view_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: true,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -2547,7 +2553,6 @@ mod agent_view_tests {
             lines: vec!["two".into()],
             cy: 0,
             cx: 3,
-            write: true,
             opened: Some(Instant::now() - VIEW_SWEEP / 2),
             glide: None,
         };
@@ -2588,7 +2593,6 @@ mod live_sync_tests {
             col: 0,
             ticks,
             elapsed: 0,
-            write: true,
         }
     }
 
@@ -2808,7 +2812,6 @@ mod glitch_safety_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: true,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -2831,7 +2834,6 @@ mod glitch_safety_tests {
             lines: vec!["one".into(), "two".into(), "three".into()],
             cy: 2,
             cx: 0,
-            write: true,
             opened: Some(Instant::now() - VIEW_SWEEP * 2),
             glide: Some((0, Instant::now() - CURSOR_GLIDE / 2)),
         };
@@ -2842,7 +2844,6 @@ mod glitch_safety_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: true,
         });
         // half-way: between line 1 (row 3) and line 3 (row 5), so on row 4
         assert_eq!(reversed_cells(&mut ed, 160, 40), vec![(6, 4)]);
@@ -2863,7 +2864,6 @@ mod glitch_safety_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: true,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -2952,7 +2952,6 @@ mod agent_colour_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: true,
         });
         ed.agent_pane = Some(pane);
         ed.poll_agent();
@@ -3299,7 +3298,6 @@ mod status_badge_follows_the_agent_tests {
             col: 0,
             ticks: 0,
             elapsed: 0,
-            write: false,
         });
         let bar = badge(&mut ed);
         assert!(
