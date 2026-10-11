@@ -130,6 +130,31 @@ pub(super) fn put_pill(
     after + 1
 }
 
+/// la capsule arrondie de la marque et du badge de statut : un demi-cercle
+/// à chaque bout, dans la couleur du segment, sur le fond de la barre. Elle
+/// reste réservée à ces deux blocs ; les autres segments restent plats.
+pub(super) fn put_capsule(
+    buf: &mut ratatui::buffer::Buffer,
+    x: u16,
+    y: u16,
+    label: &str,
+    fg: Color,
+    bg: Color,
+    bold: bool,
+    edge_bg: Color,
+) -> u16 {
+    buf[(x, y)]
+        .set_symbol("\u{E0B6}")
+        .set_fg(bg)
+        .set_bg(edge_bg);
+    let after = put_seg(buf, x + 1, y, label, fg, bg, bold);
+    buf[(after, y)]
+        .set_symbol("\u{E0B4}")
+        .set_fg(bg)
+        .set_bg(edge_bg);
+    after + 1
+}
+
 /// Écrit un segment de barre (fond + texte) et retourne la colonne suivante.
 pub(super) fn put_seg(
     buf: &mut ratatui::buffer::Buffer,
@@ -424,7 +449,16 @@ pub(super) fn draw_topbar(frame: &mut Frame, ed: &Editor, area: ratatui::layout:
     let mut x = area.x;
     // brand: a rounded pill, so even the wordmark has no square corner
     x = if icons_enabled() {
-        put_pill(buf, x, area.y, " nana ", Ed::bar_bg(), Ed::accent(), true)
+        put_capsule(
+            buf,
+            x,
+            area.y,
+            " nana ",
+            Ed::bar_bg(),
+            Ed::accent(),
+            true,
+            Ed::bar_bg(),
+        )
     } else {
         put_seg(buf, x, area.y, " nana ", Ed::bar_bg(), Ed::accent(), true) + 1
     };
@@ -575,7 +609,7 @@ pub(super) fn draw_statusbar(frame: &mut Frame, ed: &Editor, area: ratatui::layo
     };
     let padded = format!(" {label} ");
     x = if icons_enabled() {
-        put_pill(buf, x, area.y, &padded, seg_bg, color, true)
+        put_capsule(buf, x, area.y, &padded, seg_bg, color, true, seg_bg)
     } else {
         put_seg(buf, x, area.y, &padded, seg_bg, color, true) + 1
     };

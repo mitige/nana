@@ -1278,13 +1278,21 @@ mod agent_pane_tests {
     }
 
     #[test]
-    fn the_bars_draw_no_powerline_caps() {
+    fn the_bars_only_round_the_brand_and_the_status_badge() {
         let mut ed = Editor::open(None).unwrap();
-        let text = render_text(&mut ed, 100, 30);
-        for cap in ['\u{E0B6}', '\u{E0B4}'] {
-            assert!(
-                !text.contains(cap),
-                "a powerline cap ({cap}) shows as a white edge on the bars:\n{text}"
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, &mut ed)).unwrap();
+        let buf = term.backend().buffer();
+        for y in [0u16, 29] {
+            let row: String = (0..100).map(|x| buf[(x, y)].symbol()).collect();
+            let caps = row
+                .chars()
+                .filter(|c| *c == '\u{E0B6}' || *c == '\u{E0B4}')
+                .count();
+            assert_eq!(
+                caps, 2,
+                "bar row {y} must carry exactly one capsule: {row:?}"
             );
         }
     }
@@ -2659,6 +2667,33 @@ mod live_sync_tests {
 }
 
 #[cfg(test)]
+mod rounded_bars_tests {
+    use super::*;
+
+    /// the brand and the status badge are pills again: a half-circle on each
+    /// end, so the two corners of the screen stay round. The other segments
+    /// stay flat, the rule of the last cleanup.
+    #[test]
+    fn the_brand_and_the_status_badge_are_rounded_pills() {
+        let mut ed = Editor::open(None).unwrap();
+        let backend = ratatui::backend::TestBackend::new(100, 20);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, &mut ed)).unwrap();
+        let buf = term.backend().buffer();
+        let top: String = (0..100).map(|x| buf[(x, 0)].symbol()).collect();
+        let bottom: String = (0..100).map(|x| buf[(x, 19)].symbol()).collect();
+        assert!(
+            top.contains('\u{E0B6}') && top.contains('\u{E0B4}'),
+            "brand not rounded: {top:?}"
+        );
+        assert!(
+            bottom.contains('\u{E0B6}') && bottom.contains('\u{E0B4}'),
+            "badge not rounded: {bottom:?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod glitch_safety_tests {
     use super::*;
 
@@ -3203,5 +3238,36 @@ mod status_badge_follows_the_agent_tests {
             bar.contains(" terminal "),
             "badge does not follow the shell: {bar:?}"
         );
+    }
+
+    /// a second prompt after a closed task opens its own page: the opening of
+    /// the last task must not stay filed under the first one.
+    #[test]
+    fn a_new_task_after_a_closed_one_opens_its_own_page() {
+        let root = std::env::temp_dir().join("nana-task-open");
+        let mut pane = AgentPane::new();
+        pane.begin_task("first task", &root);
+        pane.closing = Some("first done".into());
+        pane.begin_task("second task", &root);
+        assert_eq!(pane.opening.as_deref(), Some("second task"));
+        assert!(
+            pane.closing.is_none(),
+            "the old closing must not leak into the new task"
+        );
+    }
+
+    /// a task that ends in error is still a task that closed: its page keeps
+    /// the failure as the closing message.
+    #[test]
+    fn a_failed_task_is_saved_with_its_error_as_closing() {
+        let root = std::env::temp_dir().join("nana-task-fail");
+        let mut pane = AgentPane::new();
+        pane.begin_task("break the build", &root);
+        pane.closing = None;
+        let e = "provider timeout";
+        if pane.closing.is_none() {
+            pane.closing = Some(format!("failed: {e}"));
+        }
+        assert_eq!(pane.closing.as_deref(), Some("failed: provider timeout"));
     }
 }

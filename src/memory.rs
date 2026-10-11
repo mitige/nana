@@ -529,7 +529,22 @@ impl Memory {
         for e in entries.iter().filter(|e| e.class != Class::User) {
             let name = e.name.to_lowercase();
             let title = e.title.to_lowercase();
-            let mentioned = req.contains(&name)
+            // a page is tied to the files it names: a path in the request that
+            // a page writes down brings that page back, whatever its name.
+            let names_a_touched_file = std::fs::read_to_string(&e.path)
+                .map(|text| {
+                    text.split_whitespace()
+                        .map(|w| {
+                            w.trim_matches(|c: char| {
+                                !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-'
+                            })
+                        })
+                        .filter(|w| w.contains('/') && w.len() > 3)
+                        .any(|w| req.contains(&w.to_lowercase()))
+                })
+                .unwrap_or(false);
+            let mentioned = names_a_touched_file
+                || req.contains(&name)
                 || (!title.is_empty() && req.contains(&title))
                 || req
                     .split(|c: char| !c.is_alphanumeric())
@@ -1161,6 +1176,30 @@ mod tests {
         assert_eq!(m.backlinks("deploy"), vec!["stack"]);
         assert!(m.backlinks("nobody").is_empty());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_page_is_recalled_when_the_request_touches_a_file_it_names() {
+        let d = tmp("filelink");
+        let m = Memory::open(&d);
+        m.write(
+            Class::Project,
+            "token-loop",
+            "# token loop\n\nthe loop that reads tokens is in src/lexer.rs, keep it iterative",
+        )
+        .unwrap();
+        m.write(Class::Project, "release", "# release\n\ntag then push")
+            .unwrap();
+        let hit = m.recall("fix the bug in src/lexer.rs", 4000);
+        assert!(
+            hit.contains("keep it iterative"),
+            "the page naming the touched file is recalled: {hit}"
+        );
+        let miss = m.recall("fix the bug in src/parser.rs", 4000);
+        assert!(
+            !miss.contains("keep it iterative"),
+            "a page naming another file is not pulled in: {miss}"
+        );
     }
 
     #[test]

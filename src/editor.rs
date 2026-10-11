@@ -364,6 +364,7 @@ impl AgentPane {
         let (Some(opening), Some(closing)) = (&self.opening, &self.closing) else {
             return false;
         };
+
         crate::memory::Memory::open(&self.root)
             .save_turn(&self.session, opening, closing)
             .is_ok()
@@ -462,6 +463,29 @@ impl AgentPane {
         });
     }
 
+    /// a prompt opens a new task whenever the previous one is closed: the
+    /// opening of the last task must not be filed under the first one.
+    fn begin_task(&mut self, request: &str, root: &Path) {
+        if self.opening.is_none() || self.closing.is_some() {
+            self.opening = Some(request.to_string());
+            self.closing = None;
+            self.root = root.to_path_buf();
+            self.session = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs().to_string())
+                .unwrap_or_else(|_| "0".into());
+        }
+    }
+
+    /// a task that ends in error is still a task that closed: its closing
+    /// message is the failure, so the page is kept rather than lost.
+    fn end_failed(&mut self, e: &str) {
+        if self.closing.is_none() {
+            self.closing = Some(format!("failed: {e}"));
+        }
+        self.save_turn_now();
+    }
+
     /// start a request on a worker thread; the events come back one by one.
     fn send(&mut self, root: &Path) {
         let request = self.input.trim().to_string();
@@ -469,14 +493,7 @@ impl AgentPane {
             return;
         }
         self.input.clear();
-        if self.opening.is_none() {
-            self.opening = Some(request.clone());
-            self.root = root.to_path_buf();
-            self.session = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs().to_string())
-                .unwrap_or_else(|_| "0".into());
-        }
+        self.begin_task(&request, root);
         self.lines.push(("you".into(), request.clone()));
         self.scroll = 0;
         self.busy = true;
@@ -585,6 +602,7 @@ impl AgentPane {
                     self.record(crate::trail::Lane::Result, e.clone(), false);
                     self.lines.push(("error".into(), safe_text(&e)));
                     self.status = "failed".into();
+                    self.end_failed(&e);
                     done = true;
                 }
             }
