@@ -1,5 +1,10 @@
 # changelog
 
+## 2.2.6
+
+- install.sh names the real repository in its error message, instead of an undefined variable.
+- the README test count follows cargo test.
+
 ## 2.2.5
 
 - the agent saves each conversation in memory: its opening message and its closing reply, as a project page.
