@@ -33,6 +33,15 @@ fn the_linux_installer_is_posix_sh_and_fetches_the_release_asset() {
 }
 
 #[test]
+fn the_linux_installer_names_no_undefined_variable() {
+    let script = read("install.sh");
+    assert!(
+        !script.contains("$repo"),
+        "install.sh uses $repo, which it never sets: the error message would print an empty path"
+    );
+}
+
+#[test]
 fn the_windows_installer_fetches_the_release_asset() {
     let script = read("install.ps1");
     assert!(

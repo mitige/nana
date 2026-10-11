@@ -15,7 +15,7 @@ esac
 
 case "$(uname -m)" in
     x86_64|amd64) ;;
-    *) echo "nana: no prebuilt binary for $(uname -m); build from source with cargo install --git https://github.com/$repo" >&2; exit 1 ;;
+    *) echo "nana: no prebuilt binary for $(uname -m); build from source with cargo install --git https://github.com/mitige/nana" >&2; exit 1 ;;
 esac
 
 for tool in curl tar; do
