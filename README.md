@@ -2,7 +2,7 @@
 
 an adaptive terminal editor. one buffer, every language.
 
-version 2.2.4.
+version 2.2.5.
 
 ![nana, the welcome screen](docs/shots/test1.png)
 
@@ -293,6 +293,7 @@ keys inside the hub:
 | `ctrl+e` | edit the file behind the selection, right here in nana |
 | `ctrl+d` | delete it: forget a page, delete a persona, fire an employee |
 | `ctrl+t` | give the selected employee a task |
+| `ctrl+y` | in the agent panel, keep the conversation so far in memory now |
 | typing | filters the list |
 | `esc` | close the hub |
 

@@ -1,5 +1,10 @@
 # changelog
 
+## 2.2.5
+
+- the agent saves each conversation in memory: its opening message and its closing reply, as a project page.
+- ctrl+y in the agent panel keeps the conversation so far in memory at once.
+
 ## 2.2.4
 
 - the release job checks out the repository before it publishes, so the changelog is found.

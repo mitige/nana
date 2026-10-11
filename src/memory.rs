@@ -335,6 +335,27 @@ impl Memory {
         Ok(path)
     }
 
+    /// keeps how one conversation began and ended, as a project page.
+    /// confidence is low so that the usual degradation and consolidation apply to it.
+    pub fn save_turn(
+        &self,
+        session: &str,
+        opening: &str,
+        closing: &str,
+    ) -> Result<PathBuf, String> {
+        let body = format!(
+            "## opened by the user\n\n{}\n\n## closed by the agent\n\n{}",
+            opening.trim(),
+            closing.trim()
+        );
+        self.write_rated(
+            Class::Project,
+            &format!("conversation-{session}"),
+            &body,
+            Confidence::Low,
+        )
+    }
+
     /// the file that keeps every version of one page, in the project memory.
     fn history_path(&self, class: Class, name: &str) -> PathBuf {
         self.root.join(".history").join(format!(
@@ -1456,6 +1477,26 @@ mod tests {
             !trig.due(&m),
             "reading a page changes its counter, not what it says: no second model call"
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_conversation_keeps_its_opening_and_closing_messages() {
+        let d = tmp("turn");
+        let m = Memory::open(&d);
+        let p = m
+            .save_turn("1700000000", "build the parser", "parser done, tests green")
+            .unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            text.contains("build the parser"),
+            "opening missing:\n{text}"
+        );
+        assert!(
+            text.contains("parser done, tests green"),
+            "closing missing:\n{text}"
+        );
+        assert!(p.ends_with("conversation-1700000000.md"), "{}", p.display());
         let _ = std::fs::remove_dir_all(&d);
     }
 

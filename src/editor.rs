@@ -351,6 +351,26 @@ struct AgentPane {
     /// the transcript already wrapped to the card's width, so a frame only
     /// wraps the lines that arrived since the last one
     transcript: TranscriptRows,
+    /// project root and session id, to know where the conversation is kept
+    root: PathBuf,
+    session: String,
+    /// how the conversation opened (the first message sent) and how the
+    /// agent's last reply closed it; both go to memory as they are known
+    opening: Option<String>,
+    closing: Option<String>,
+}
+
+impl AgentPane {
+    /// keeps the opening and the closing of this conversation in the project
+    /// memory. the memory is best effort: a failed write must not break a chat.
+    fn save_turn_now(&self) -> bool {
+        let (Some(opening), Some(closing)) = (&self.opening, &self.closing) else {
+            return false;
+        };
+        crate::memory::Memory::open(&self.root)
+            .save_turn(&self.session, opening, closing)
+            .is_ok()
+    }
 }
 
 /// the transcript as rows ready to paint. lines are only ever appended, so the
@@ -422,6 +442,10 @@ impl AgentPane {
             status: String::new(),
             persona: None,
             writes: Vec::new(),
+            root: PathBuf::new(),
+            session: String::new(),
+            opening: None,
+            closing: None,
             trail: Vec::new(),
             started: std::time::Instant::now(),
             last_event: std::time::Instant::now(),
@@ -448,6 +472,14 @@ impl AgentPane {
             return;
         }
         self.input.clear();
+        if self.opening.is_none() {
+            self.opening = Some(request.clone());
+            self.root = root.to_path_buf();
+            self.session = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs().to_string())
+                .unwrap_or_else(|_| "0".into());
+        }
         self.lines.push(("you".into(), request.clone()));
         self.scroll = 0;
         self.busy = true;
@@ -490,6 +522,7 @@ impl AgentPane {
                 crate::agent::Event::Text(t) => {
                     let t = safe_text(&t);
                     self.record(crate::trail::Lane::Say, t.clone(), true);
+                    self.closing = Some(t.clone());
                     self.lines.push(("agent".into(), t));
                 }
                 crate::agent::Event::ToolCall { name, args } => {
@@ -548,6 +581,7 @@ impl AgentPane {
                 }
                 crate::agent::Event::Finished { steps } => {
                     self.status = format!("done in {steps} step(s)");
+                    self.save_turn_now();
                     done = true;
                 }
                 crate::agent::Event::Error(e) => {
@@ -2456,6 +2490,14 @@ impl Editor {
             KeyCode::Up => pane.scroll = pane.scroll.saturating_add(1),
             KeyCode::Down => pane.scroll = pane.scroll.saturating_sub(1),
             KeyCode::Char(c) if !ctrl => pane.input.push(c),
+            // ctrl+y keeps the conversation in memory now, without waiting for the turn to end
+            KeyCode::Char('y') if ctrl => {
+                pane.status = if pane.save_turn_now() {
+                    "conversation saved to memory".into()
+                } else {
+                    "nothing to save yet: send a message and get an answer first".into()
+                };
+            }
             _ => {}
         }
     }
@@ -6007,6 +6049,57 @@ mod float_tests {
 
     /// the agent's write plays in a second view behind the card: the lines it
     /// writes are on screen, outside the card, and the card stays clean.
+    #[test]
+    fn the_turn_end_saves_the_opening_and_the_last_reply() {
+        let root = std::env::temp_dir().join(format!("nana-turn-end-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".nana")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut pane = AgentPane::new();
+        pane.rx = Some(rx);
+        pane.root = root.clone();
+        pane.session = "auto".into();
+        pane.opening = Some("first ask".into());
+        tx.send(crate::agent::Event::Text("first answer".into()))
+            .unwrap();
+        tx.send(crate::agent::Event::Text("last answer".into()))
+            .unwrap();
+        tx.send(crate::agent::Event::Finished { steps: 2 }).unwrap();
+        pane.poll();
+        let saved = crate::memory::Memory::open(&root)
+            .read(crate::memory::Class::Project, "conversation-auto")
+            .unwrap_or_default();
+        assert!(saved.contains("first ask"), "{saved}");
+        assert!(
+            saved.contains("last answer"),
+            "the last reply is kept: {saved}"
+        );
+        assert!(
+            !saved.contains("first answer"),
+            "only the last reply is kept: {saved}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ctrl_y_keeps_the_conversation_so_far_in_memory() {
+        let root = std::env::temp_dir().join(format!("nana-ctrl-y-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".nana")).unwrap();
+        let mut pane = AgentPane::new();
+        pane.root = root.clone();
+        pane.session = "manual".into();
+        pane.opening = Some("build the parser".into());
+        pane.closing = Some("parser done".into());
+        pane.save_turn_now();
+        let saved = crate::memory::Memory::open(&root)
+            .read(crate::memory::Class::Project, "conversation-manual")
+            .unwrap_or_default();
+        assert!(saved.contains("build the parser"), "{saved}");
+        assert!(saved.contains("parser done"), "{saved}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_agent_write_plays_in_a_view_behind_the_card() {
         let mut ed = Editor::open(None).unwrap();
