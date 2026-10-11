@@ -221,37 +221,27 @@ fn ticks_for(waited: Duration) -> usize {
     (waited.as_millis() / TICK.as_millis()).max(1) as usize
 }
 
-/// the most ticks the playback may owe the agent: about a second and a half at
-/// 60 fps. past it, the waiting writes are shortened so the screen catches up
-/// with the agent instead of showing what it did a minute ago.
-const LAG_BUDGET: usize = 94;
 /// the most writes that may wait behind the one on screen. beyond it the oldest
 /// land at once: a flood must not turn into a queue the user watches for minutes.
 const MAX_QUEUE: usize = 24;
 
-/// keeps the playback in step with the agent. the text of every write still
-/// lands in full; only the time it takes shrinks. writes without a duration
-/// (ticks 0, one letter per tick) are left as they were.
+/// keeps the queue short: past MAX_QUEUE waiting writes, the oldest land at
+/// once. no write is shortened by its duration, so a single long write plays
+/// at its own pace. a write already on screen is never touched: rewriting its
+/// duration mid-line would make its text jump ahead.
 fn catch_up(live: &mut [LiveWrite]) {
     let n = live.len();
     if n > MAX_QUEUE {
-        for w in live[..n - MAX_QUEUE].iter_mut().filter(|w| w.ticks > 0) {
-            w.ticks = w.ticks.min(w.elapsed + 1);
+        for w in live[..n - MAX_QUEUE].iter_mut().filter(|w| is_waiting(w)) {
+            w.ticks = 1;
         }
     }
-    let owed: usize = live
-        .iter()
-        .filter(|w| w.ticks > 0)
-        .map(|w| w.ticks.saturating_sub(w.elapsed))
-        .sum();
-    if owed <= LAG_BUDGET {
-        return;
-    }
-    for w in live.iter_mut().filter(|w| w.ticks > 0) {
-        let left = w.ticks.saturating_sub(w.elapsed);
-        let fit = (left * LAG_BUDGET / owed).max(1);
-        w.ticks = w.elapsed + fit;
-    }
+}
+
+/// whether a queued write has not started yet: it has a duration and no tick
+/// has been played, so shrinking it cannot change what is already on screen.
+fn is_waiting(w: &LiveWrite) -> bool {
+    w.ticks > 0 && w.elapsed == 0
 }
 
 /// Niveau d'une notification toast.

@@ -7,6 +7,7 @@ use std::process::Command;
 
 const LINUX_ASSET: &str = "nana-linux-x86_64.tar.gz";
 const WINDOWS_ASSET: &str = "nana-windows-x86_64.zip";
+const MACOS_ASSET: &str = "nana-macos-aarch64.tar.gz";
 
 fn read(path: &str) -> String {
     let full = Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
@@ -51,6 +52,28 @@ fn the_windows_installer_fetches_the_release_asset() {
     assert!(
         script.contains("github.com/mitige/nana/releases"),
         "install.ps1 must download from the release page"
+    );
+}
+
+#[test]
+fn the_release_publishes_a_macos_binary() {
+    let workflow = read(".github/workflows/release.yml");
+    assert!(
+        workflow.contains("runs-on: macos-latest"),
+        "release.yml must build on macos"
+    );
+    assert!(
+        workflow.contains(MACOS_ASSET),
+        "release.yml must package {MACOS_ASSET}"
+    );
+}
+
+#[test]
+fn the_linux_installer_also_accepts_macos() {
+    let script = read("install.sh");
+    assert!(
+        script.contains("Darwin") && script.contains(MACOS_ASSET),
+        "install.sh must fetch {MACOS_ASSET} on macos"
     );
 }
 

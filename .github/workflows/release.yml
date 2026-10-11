@@ -26,6 +26,23 @@ jobs:
           name: linux
           path: nana-linux-x86_64.tar.gz
 
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release
+      - run: cargo build --release
+      - name: package
+        run: |
+          mkdir dist
+          cp target/release/nana dist/
+          tar -czf nana-macos-aarch64.tar.gz -C dist nana
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: nana-macos-aarch64.tar.gz
+
   windows:
     runs-on: windows-latest
     steps:
@@ -42,7 +59,7 @@ jobs:
           path: nana-windows-x86_64.zip
 
   publish:
-    needs: [linux, windows]
+    needs: [linux, macos, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,4 +69,4 @@ jobs:
       - name: publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" nana-linux-x86_64.tar.gz nana-windows-x86_64.zip --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md
+        run: gh release create "$GITHUB_REF_NAME" nana-linux-x86_64.tar.gz nana-macos-aarch64.tar.gz nana-windows-x86_64.zip --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md

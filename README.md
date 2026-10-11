@@ -2,7 +2,7 @@
 
 an adaptive terminal editor. one buffer, every language.
 
-version 2.2.7.
+version 2.2.8.
 
 ![nana, the welcome screen](docs/shots/test1.png)
 
@@ -40,7 +40,7 @@ modern shells start cleanly inside it.
 
 ## install
 
-linux (any distribution, x86_64):
+linux (any distribution, x86_64) and macos (apple silicon):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mitige/nana/main/install.sh | sh
@@ -52,8 +52,10 @@ windows (powershell):
 irm https://raw.githubusercontent.com/mitige/nana/main/install.ps1 | iex
 ```
 
-both fetch the latest release, put `nana` in `~/.local/bin` (linux) or
-`%LOCALAPPDATA%\nana\bin` (windows), and add that folder to your PATH.
+the shell installer fetches the latest release, puts `nana` in `~/.local/bin`
+(linux and macos) or `%LOCALAPPDATA%\nana\bin` (windows), and adds that folder
+to your PATH by hand: check it is there.
+set `NANA_INSTALL_DIR` to choose another folder.
 set `NANA_INSTALL_DIR` to choose another folder.
 
 from source (rust 1.75+):
@@ -505,7 +507,7 @@ final_newline = true
 ## development
 
 ```sh
-cargo test        # 338 tests, no network, no fixtures to download
+cargo test        # 342 tests, no network, no fixtures to download
 cargo run         # the editor, on this repository
 cargo run -- --languages
 ```
