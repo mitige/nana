@@ -540,7 +540,7 @@ impl AgentPane {
                     self.lines.push(("agent".into(), t));
                 }
                 crate::agent::Event::ToolCall { name, args } => {
-                    let label = format!("{name} {}", short_json(&args));
+                    let label = terminal_header(&name, &args);
                     self.record(crate::trail::Lane::Tool, label.clone(), true);
                     self.lines.push(("tool".into(), label));
                     self.pending = Some((name, args, false));

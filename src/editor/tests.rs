@@ -589,10 +589,10 @@ mod hub_takes_the_screen_tests {
 mod hub_is_the_start_tests {
     use super::*;
 
-    /// nana opens on the hub: the first thing a user sees is the menu, and
-    /// nothing of the ide (explorer, buffer, status bar) is drawn behind it.
+    /// nana opens on the ide: the explorer and the status bar are visible,
+    /// and the hub (ctrl+w) is not opened by itself.
     #[test]
-    fn a_bare_start_opens_on_the_hub_alone() {
+    fn a_bare_start_opens_on_the_ide_not_on_the_hub() {
         let root = scratch("start");
         std::fs::write(root.join("a.rs"), "fn secret_start_text() {}\n").unwrap();
         let cwd = std::env::current_dir().unwrap();
@@ -601,14 +601,11 @@ mod hub_is_the_start_tests {
         std::env::set_current_dir(&cwd).unwrap();
         let mut ed = started.unwrap();
         let text = render_text(&mut ed, 110, 30);
-        assert!(ed.hub.is_some(), "the hub is the start screen");
+        assert!(ed.hub.is_none(), "no hub opens at start");
+        assert!(text.contains("a.rs"), "the explorer is shown at start");
         assert!(
-            !text.contains("a.rs"),
-            "explorer leaks behind the start hub"
-        );
-        assert!(
-            !text.contains("ln 1, col 1"),
-            "status bar leaks behind the start hub"
+            text.contains("ln 1, col 1"),
+            "the status bar is shown at start"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3068,6 +3065,77 @@ mod terminal_look_tests {
         assert!(
             !shown.contains("> run_shell"),
             "the json call is still shown:\n{shown}"
+        );
+    }
+
+    /// the trail, the band under the card, shows a shell command as a prompt
+    /// too: the json of the call is not what a person would read.
+    #[test]
+    fn the_trail_shows_a_shell_command_as_a_prompt_not_as_json() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        let (tx, rx) = channel();
+        pane.rx = Some(rx);
+        tx.send(crate::agent::Event::ToolCall {
+            name: "run_shell".into(),
+            args: serde_json::json!({"command": "ls"}),
+        })
+        .unwrap();
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        let trail: Vec<String> = ed
+            .agent_pane
+            .as_ref()
+            .unwrap()
+            .trail
+            .iter()
+            .map(|s| s.label.clone())
+            .collect();
+        assert!(
+            trail.iter().any(|t| t == "$ ls"),
+            "the trail shows json, not a prompt: {trail:?}"
+        );
+    }
+
+    /// on screen, a shell action reads as a terminal typed by a person: no
+    /// line numbers in a gutter, no window named after the internal view.
+    #[test]
+    fn a_shell_action_on_screen_has_no_file_gutter_and_no_machine_title() {
+        let mut ed = Editor::open(None).unwrap();
+        let mut pane = AgentPane::new();
+        let (tx, rx) = channel();
+        pane.rx = Some(rx);
+        tx.send(crate::agent::Event::ToolCall {
+            name: "run_shell".into(),
+            args: serde_json::json!({"command": "ls"}),
+        })
+        .unwrap();
+        tx.send(crate::agent::Event::ToolResult {
+            name: "run_shell".into(),
+            ok: true,
+            text: "Cargo.toml".into(),
+        })
+        .unwrap();
+        ed.agent_pane = Some(pane);
+        ed.poll_agent();
+        let mut guard = 0;
+        while !ed.live.is_empty() && guard < 10_000 {
+            ed.play_live();
+            guard += 1;
+        }
+        ed.agent_view.opened = Some(Instant::now() - VIEW_SWEEP * 2);
+        let screen = render_rows(&mut ed, 120, 40).join("\n");
+        assert!(
+            !screen.contains("agent actions"),
+            "the window is named after the internal view:\n{screen}"
+        );
+        assert!(
+            !screen.contains("1 $ ls"),
+            "the terminal is drawn with a file's line numbers:\n{screen}"
+        );
+        assert!(
+            screen.contains("$ ls"),
+            "the command is not on screen:\n{screen}"
         );
     }
 }

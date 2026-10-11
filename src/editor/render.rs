@@ -852,8 +852,17 @@ pub(super) fn draw_agent_view(
         _ => zone,
     };
     let is_action = crate::editor::is_action_view(path);
+    // an action is what a person would type in a terminal: no file gutter and
+    // no internal window name, only the tool's own words
     let title = if is_action {
-        format!(" nana · {} ", safe_text(&path.display().to_string()))
+        let tool = path.to_string_lossy();
+        let tool = tool.rsplit(": ").next().unwrap_or("");
+        let name = if tool == "run_shell" {
+            "terminal"
+        } else {
+            tool
+        };
+        format!(" {} ", safe_text(name))
     } else {
         let verb = if view.write { "write" } else { "read" };
         format!(" nana · {verb} {} ", safe_text(&path.display().to_string()))
@@ -862,6 +871,8 @@ pub(super) fn draw_agent_view(
     let inner = draw_box(frame, zone, &[(title, Ed::cyan())], Ed::cyan());
     let h = inner.height as usize;
     let start = view.cy.saturating_sub(h.saturating_sub(1));
+    // the number gutter is five columns wide; an action has none
+    let gutter: u16 = if is_action { 0 } else { 5 };
     let ext = if is_action {
         ""
     } else {
@@ -881,13 +892,16 @@ pub(super) fn draw_agent_view(
             // the current line is marked only while the agent is writing:
             // an idle view shows its file, not a place where nothing happens
             let cur = playing && i == view.cy;
-            let mut spans = vec![Span::styled(
-                format!("{:>4} ", i + 1),
-                Style::default().fg(if cur { Ed::text() } else { Ed::gutter() }),
-            )];
+            let mut spans = Vec::new();
+            if !is_action {
+                spans.push(Span::styled(
+                    format!("{:>4} ", i + 1),
+                    Style::default().fg(if cur { Ed::text() } else { Ed::gutter() }),
+                ));
+            }
             // the file's own language colours the code, as the editor does
             spans.extend(render_line(
-                &clip(text, inner.width.saturating_sub(5) as usize),
+                &clip(text, inner.width.saturating_sub(gutter) as usize),
                 Ed::text(),
                 ext,
             ));
@@ -896,7 +910,7 @@ pub(super) fn draw_agent_view(
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
     if playing {
-        draw_agent_cursor(frame, view, inner, start);
+        draw_agent_cursor(frame, view, inner, start, gutter);
     }
 }
 
@@ -908,6 +922,7 @@ pub(super) fn draw_agent_cursor(
     view: &AgentView,
     inner: ratatui::layout::Rect,
     start: usize,
+    gutter: u16,
 ) {
     let line = match view.glide {
         Some((from, since)) if since.elapsed() < CURSOR_GLIDE => {
@@ -928,8 +943,8 @@ pub(super) fn draw_agent_cursor(
         .get(view.cy)
         .map(|l| drawn_width(l.get(..view.cx).unwrap_or(l)))
         .unwrap_or(0);
-    // the number gutter is five columns wide: the text starts after it
-    let x = inner.x + 5 + typed as u16;
+    // the text starts after the gutter, if the view has one
+    let x = inner.x + gutter + typed as u16;
     if x >= inner.right() {
         return;
     }
@@ -1808,7 +1823,6 @@ pub(super) fn start_editor(path: &Option<PathBuf>) -> io::Result<Editor> {
             c
         });
     ed.ai = ai;
-    ed.open_hub_at_start(&root);
     Ok(ed)
 }
 
