@@ -1,5 +1,13 @@
 # changelog
 
+## 2.2.7
+
+- the live view opens one window per agent action, its badge follows the action, and the editor is split beside it.
+- an action shows the tool's own words; run_shell runs in a terminal, with no gutter.
+- memory: a new task opens its own page, a failed task is kept, and pages are recalled by the files they name.
+- bars and selected rows drop the powerline half-circles; the white edge is gone.
+- boxes have no title; a second shell command no longer erases the first one.
+
 ## 2.2.6
 
 - install.sh names the real repository in its error message, instead of an undefined variable.
