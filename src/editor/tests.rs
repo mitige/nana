@@ -1010,11 +1010,10 @@ mod hub_ui_tests {
         }
         assert!(right >= left, "the cards are side by side");
         // the highlight is on the first item, right under the section list
-        // the band's left cap replaces the marker cell: look for the cap and
-        // the label on the same row
+        // the selected row is the one carrying its label
         let band = rows
             .iter()
-            .position(|r| r.contains('\u{E0B6}') && r.contains("project: stack"))
+            .position(|r| r.contains("project: stack"))
             .expect("the selected row is marked");
         assert!(
             band > left && band < bottom,
@@ -1276,6 +1275,18 @@ mod agent_pane_tests {
         let pane = ed.agent_pane.as_ref().unwrap();
         assert_eq!(pane.lines.len(), before, "nothing was sent");
         assert!(pane.rx.is_none(), "and no worker was started");
+    }
+
+    #[test]
+    fn the_bars_draw_no_powerline_caps() {
+        let mut ed = Editor::open(None).unwrap();
+        let text = render_text(&mut ed, 100, 30);
+        for cap in ['\u{E0B6}', '\u{E0B4}'] {
+            assert!(
+                !text.contains(cap),
+                "a powerline cap ({cap}) shows as a white edge on the bars:\n{text}"
+            );
+        }
     }
 
     #[test]

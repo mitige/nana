@@ -98,10 +98,8 @@ pub(super) fn float_bg() -> Color {
     Color::Reset
 }
 
-/// Give a background band rounded ends: the powerline half-circles sit on the
-/// first and last cell of the row, in the band's own colour. This is what
-/// turns a selected row from a rectangle into a pill — the same language the
-/// bars already speak.
+/// Peint la bande de fond d'une ligne sur x0..=x1, sans demi-cercle aux bouts
+/// (le bord blanc qu'ils laissaient sur certains terminaux).
 pub(super) fn round_band(buf: &mut ratatui::buffer::Buffer, y: u16, x0: u16, x1: u16, band: Color) {
     if x1 <= x0 {
         return;
@@ -112,21 +110,11 @@ pub(super) fn round_band(buf: &mut ratatui::buffer::Buffer, y: u16, x0: u16, x1:
     for x in x0..=x1 {
         buf[(x, y)].set_bg(band);
     }
-    if !icons_enabled() {
-        return;
-    }
-    // a cap only replaces an empty cell: the name of the file you are hovering
-    // must never lose its last letter to the rounded end
-    for (x, glyph) in [(x0, CAP_L), (x1, CAP_R)] {
-        let cell = &mut buf[(x, y)];
-        if cell.symbol().trim().is_empty() || cell.symbol() == "▎" {
-            cell.set_symbol(glyph).set_fg(band).set_bg(Ed::bg());
-        }
-    }
 }
 
-/// a rounded segment: the label, with a powerline half-circle on each end, so
-/// the bar reads as pills rather than as a row of blocks.
+/// un segment de barre : le libellé, encadré d'une cellule de la couleur du
+/// segment de chaque côté. Pas de demi-cercle : il se voit en blanc sur les
+/// terminaux dont la police ne le dessine pas comme le fond.
 pub(super) fn put_pill(
     buf: &mut ratatui::buffer::Buffer,
     x: u16,
@@ -136,15 +124,9 @@ pub(super) fn put_pill(
     bg: Color,
     bold: bool,
 ) -> u16 {
-    buf[(x, y)]
-        .set_symbol(CAP_L)
-        .set_fg(bg)
-        .set_bg(Ed::bar_bg());
+    buf[(x, y)].set_symbol(" ").set_bg(bg);
     let after = put_seg(buf, x + 1, y, label, fg, bg, bold);
-    buf[(after, y)]
-        .set_symbol(CAP_R)
-        .set_fg(bg)
-        .set_bg(Ed::bar_bg());
+    buf[(after, y)].set_symbol(" ").set_bg(bg);
     after + 1
 }
 

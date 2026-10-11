@@ -52,9 +52,6 @@ const VIEW_SWEEP: Duration = Duration::from_millis(240);
 const CURSOR_GLIDE: Duration = Duration::from_millis(160);
 /// the spinner: ten braille frames, one every 80 ms.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-/// the rounded ends of a pill segment (powerline half circles).
-const CAP_L: &str = "\u{E0B6}";
-const CAP_R: &str = "\u{E0B4}";
 
 /// Largeur du panneau explorateur (séparateur compris).
 const EXPL_W: u16 = 30;
