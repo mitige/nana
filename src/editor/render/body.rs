@@ -30,6 +30,7 @@ pub(in crate::editor) fn draw_body(frame: &mut Frame, ed: &Editor, zone: Rect) {
             Ed::cur_line(),
         );
     }
+    paint_bootcamp_words(frame, ed, body[1]);
     draw_ruler(frame, body[1]);
     if ed.focus == Focus::Editor {
         draw_editor_cursor(frame, ed, body[1]);
@@ -95,6 +96,32 @@ pub(in crate::editor) fn draw_text(frame: &mut Frame, ed: &Editor, area: Rect) {
         .map(|i| text_line(ed, ed.scroll_y + i, ghost_len))
         .collect();
     frame.render_widget(Paragraph::new(text_lines), area);
+}
+
+/// Paints the background behind the words the bootcamp forbids (`any`, `var`)
+/// on the visible lines, so the student sees them in the text and not only in
+/// the gutter. Columns are measured on the cleaned text, never the raw one.
+fn paint_bootcamp_words(frame: &mut Frame, ed: &Editor, area: Rect) {
+    if ed.bootcamp_marks.is_empty() {
+        return;
+    }
+    for row in 0..area.height as usize {
+        let n = ed.scroll_y + row;
+        let Some(raw) = ed.lines.get(n) else {
+            continue;
+        };
+        let cleaned = safe_text(raw);
+        for span in crate::bootcamp::forbidden_word_spans(&cleaned) {
+            let start = drawn_width(&cleaned[..span.start]);
+            let width = drawn_width(&cleaned[span.clone()]);
+            for col in start..start + width {
+                let x = area.x + col as u16;
+                if x < area.right() {
+                    frame.buffer_mut()[(x, area.y + row as u16)].set_bg(Ed::amber());
+                }
+            }
+        }
+    }
 }
 
 /// Builds the row for the buffer line `n`: a ghost line below the cursor for a

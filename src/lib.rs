@@ -12,6 +12,7 @@
 
 pub mod agent;
 pub mod ai;
+pub mod bootcamp;
 pub mod check;
 pub mod company;
 pub mod config;

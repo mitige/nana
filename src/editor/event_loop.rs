@@ -168,6 +168,9 @@ impl Editor {
             KeyCode::F(4) => self.generate_header(),
             KeyCode::F(5) => self.run_file(),
             KeyCode::F(6) => self.run_format(),
+            KeyCode::F(7) => self.bootcamp_check(),
+            KeyCode::F(8) => self.check_bootcamp_package(),
+            KeyCode::F(9) => self.insert_bootcamp_templates(),
             KeyCode::Esc => self.cancel_or_decline(),
             KeyCode::Left => self.move_left(),
             KeyCode::Right => self.move_right(),
@@ -387,6 +390,9 @@ impl Editor {
                 Severity::Major => put(*line, 2, Ed::red()),
                 Severity::Minor => put(*line, 1, Ed::amber()),
             }
+        }
+        for line in &self.bootcamp_marks {
+            put(*line, 2, Ed::red());
         }
         for d in &self.diags {
             if d.is_error {

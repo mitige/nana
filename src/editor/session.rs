@@ -85,7 +85,9 @@ pub(in crate::editor) fn loop_run(
         }
         ed.poll_ai();
         ed.poll_check();
+        ed.refresh_bootcamp_marks();
         ed.poll_diag();
+        ed.poll_bootcamp();
         ed.poll_header();
         ed.poll_consolidation();
         ed.poll_quiet(Instant::now());

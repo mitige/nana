@@ -297,6 +297,11 @@ pub struct Editor {
     /// the user's typing rhythm: when the quiet is long enough, the memory is looked at
     quiet: crate::quiet::Quiet,
     check_marks: Vec<(usize, Severity)>,
+    /// lines that use a word the bootcamp forbids (`any`, `var`), kept apart
+    /// from the style report so a background report does not erase them.
+    bootcamp_marks: Vec<usize>,
+    /// verdict of the F7 bootcamp check running in the background.
+    bootcamp_rx: Option<Receiver<Result<String, String>>>,
     check_rx: Option<Receiver<crate::check::Report>>,
     /// diagnostics gcc du dernier build (^B) + navigation ^N/^P
     diags: Vec<Diag>,
@@ -473,6 +478,8 @@ impl Editor {
             status_seen: status_seen.clone(),
             quiet: crate::quiet::Quiet::default(),
             check_marks: Vec::new(),
+            bootcamp_marks: Vec::new(),
+            bootcamp_rx: None,
             check_rx: None,
             diags: Vec::new(),
             diag_rx: None,
@@ -524,6 +531,7 @@ fn rule_tag(msg: &str) -> Option<String> {
 mod agent_focus;
 mod agent_pane;
 mod assist;
+mod bootcamp;
 mod build;
 mod editing;
 mod event_loop;

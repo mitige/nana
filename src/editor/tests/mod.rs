@@ -46,6 +46,7 @@ mod agent_colour;
 mod agent_input;
 mod agent_pane;
 mod agent_view;
+mod bootcamp;
 mod busy_look;
 mod completion;
 mod diag;
