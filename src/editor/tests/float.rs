@@ -88,16 +88,9 @@ fn the_agent_write_plays_in_a_view_behind_the_card() {
     pane.writes.push(LiveWrite {
         path: PathBuf::from("src/lib.rs"),
         text: vec!["fn behind_the_card() {}".into()],
-        shown: 0,
-        col: 0,
-        ticks: 0,
-        elapsed: 0,
     });
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    while !ed.live.is_empty() {
-        ed.play_live();
-    }
     std::thread::sleep(VIEW_SWEEP);
     let text = render_text(&mut ed, 160, 40);
     assert!(has_card_top(&text), "the card is drawn:\n{text}");

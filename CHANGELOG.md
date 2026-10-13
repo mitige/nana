@@ -1,5 +1,10 @@
 # changelog
 
+## 2.5.0
+
+- magi: three sages judge the project's memory, each with one lens. balthasar keeps the conversations, casper the cards (user, feedback, project), melchior the world model. a page another page links to survives whatever its date, a sage never buries a page a brother kept, and a tie keeps the page. a retired page keeps its history. reachable as `nana --magi [--apply]` and as the `magi` tool of the agent.
+- the agent's view can no longer fall behind: a write is shown whole the moment the agent makes it. the playback queue, its per-write durations and the catch-up ceiling are gone, so no amount of work by the agent can build a lag. the cursor stays on the last line where the agent stopped, then the view is a file like any other.
+
 ## 2.2.9
 
 - the agent's playback (writes, reads, actions) advances by wall-clock time, one step per 16 ms tick. before, every wake-up of the loop (a key, a mouse move) played a step, so the write jumped ahead in bursts.

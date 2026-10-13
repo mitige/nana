@@ -1,11 +1,12 @@
-//! live write tests of the editor screen.
+//! live write tests of the editor screen: the agent's view, beside the user's
+//! buffer, never written by the agent and never behind it.
 
 use super::*;
 
-/// the agent's write is played one line at a time in the agent's own view,
-/// beside the user's buffer. the user's buffer is never written by it.
+/// the agent's write lands whole in the agent's own view, at once, beside the
+/// user's buffer. the user's buffer is never written by it.
 #[test]
-fn a_write_is_played_one_line_at_a_time_beside_the_user_buffer() {
+fn a_write_lands_whole_beside_the_user_buffer() {
     let d = scratch("live");
     let target = d.join("new.rs");
     let mut ed = Editor::open(None).unwrap();
@@ -19,29 +20,14 @@ fn a_write_is_played_one_line_at_a_time_beside_the_user_buffer() {
             "fn two() {}".into(),
             "fn three() {}".into(),
         ],
-        shown: 0,
-        col: 0,
-        ticks: 0,
-        elapsed: 0,
     });
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    assert_eq!(
-        ed.live.len(),
-        1,
-        "the write is taken over by the agent view"
-    );
-    ed.play_live();
-    let text = render_text(&mut ed, 160, 40);
-    assert!(!text.contains("fn one() {}"), "one letter after one step");
-    while !ed.live.is_empty() {
-        ed.play_live();
-    }
     std::thread::sleep(VIEW_SWEEP);
     let text = render_text(&mut ed, 160, 40);
     assert!(
         text.contains("fn three() {}"),
-        "the file is whole on screen"
+        "the file is whole on screen at the first poll"
     );
     assert_eq!(
         ed.lines,
@@ -49,7 +35,6 @@ fn a_write_is_played_one_line_at_a_time_beside_the_user_buffer() {
         "the user's buffer is never written by the agent"
     );
     assert!(!ed.modified, "the user's buffer is not marked as edited");
-    assert!(ed.live.is_empty(), "the playback is over");
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -65,16 +50,9 @@ fn the_agent_text_is_on_screen_and_the_user_text_is_not() {
     pane.writes.push(LiveWrite {
         path: d.join("new.rs"),
         text: vec!["AGENT_TEXT_SHOWS".into()],
-        shown: 0,
-        col: 0,
-        ticks: 0,
-        elapsed: 0,
     });
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    while !ed.live.is_empty() {
-        ed.play_live();
-    }
     std::thread::sleep(VIEW_SWEEP);
     let rows = render_rows(&mut ed, 160, 40);
     assert!(
@@ -94,10 +72,10 @@ fn the_agent_text_is_on_screen_and_the_user_text_is_not() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// a read is shown the same way, line by line, but it changes nothing: the
+/// a read is shown the same way, whole at once, and it changes nothing: the
 /// file is not saved again and the buffer is not marked as edited.
 #[test]
-fn a_read_is_shown_line_by_line_and_changes_nothing() {
+fn a_read_is_shown_whole_and_changes_nothing() {
     let d = scratch("live-read-show");
     let target = d.join("notes.txt");
     let mut ed = Editor::open(None).unwrap();
@@ -107,27 +85,14 @@ fn a_read_is_shown_line_by_line_and_changes_nothing() {
     pane.writes.push(LiveWrite {
         path: target.clone(),
         text: vec!["alpha".into(), "beta".into()],
-        shown: 0,
-        col: 0,
-        ticks: 0,
-        elapsed: 0,
     });
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    ed.play_live();
     assert_eq!(
         ed.agent_view.lines,
-        vec!["a".to_string()],
-        "the read appears one letter at a time in the agent view"
+        vec!["alpha".to_string(), "beta".to_string()],
+        "the read appears whole in the agent view"
     );
-    while !ed.live.is_empty() {
-        ed.play_live();
-    }
-    assert_eq!(
-        ed.agent_view.lines,
-        vec!["alpha".to_string(), "beta".to_string()]
-    );
-    assert!(ed.live.is_empty(), "the read is over");
     assert_eq!(
         ed.lines,
         vec![String::new()],
@@ -153,23 +118,15 @@ fn a_read_does_not_replace_unsaved_work() {
     pane.writes.push(LiveWrite {
         path: d.join("theirs.txt"),
         text: vec!["something else".into()],
-        shown: 0,
-        col: 0,
-        ticks: 0,
-        elapsed: 0,
     });
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    while !ed.live.is_empty() {
-        ed.play_live();
-    }
     assert_eq!(
         ed.lines,
         vec!["my unsaved line".to_string()],
         "the buffer is untouched"
     );
     assert!(ed.modified, "the edit is still marked as unsaved");
-    assert!(ed.live.is_empty(), "the read is played in the agent view");
     assert_eq!(
         ed.agent_view.lines,
         vec!["something else".to_string()],

@@ -132,3 +132,25 @@ fn contexte_marqueur_curseur_sans_panique() {
     }));
     assert!(r.is_ok());
 }
+
+/// La complétion (ctrl+espace) parle au même modèle que l'agent (ctrl+a) :
+/// le modèle et l'adresse du projet, pas un client à part.
+#[test]
+fn la_complétion_utilise_le_modèle_unique_de_l_éditeur() {
+    let d = scratch("completion-agent");
+    let (url, server) = mock("int i = 0;");
+    let mut ed = Editor::open(None).unwrap();
+    ed.file = Some(d.join("x.c"));
+    ed.ai = Some(crate::ai::AiClient::at(
+        url,
+        "test-key".into(),
+        "deepseek-v4.1-flash".into(),
+    ));
+    ed.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+    let req = server.join().unwrap();
+    assert!(
+        req.contains("\"model\":\"deepseek-v4.1-flash\""),
+        "the completion reached the editor's single model: {}",
+        req.chars().take(300).collect::<String>()
+    );
+}

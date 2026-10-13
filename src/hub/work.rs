@@ -238,7 +238,9 @@ impl Hub {
                     self.activity.push(("error".into(), e));
                     finished = true;
                 }
-                crate::agent::Event::Started { .. } | crate::agent::Event::File { .. } => {}
+                crate::agent::Event::Started { .. }
+                | crate::agent::Event::File { .. }
+                | crate::agent::Event::Retry { .. } => {}
             }
         }
         if finished {

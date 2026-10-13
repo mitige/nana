@@ -12,15 +12,13 @@ fn badge(ed: &mut Editor) -> String {
 #[test]
 fn the_badge_names_the_action_the_agent_plays() {
     let mut ed = Editor::open(None).unwrap();
-    ed.agent_pane = Some(AgentPane::new());
-    ed.live.push(LiveWrite {
+    let mut pane = AgentPane::new();
+    pane.writes.push(LiveWrite {
         path: PathBuf::from(format!("{ACTIONS_VIEW}: run_shell")),
         text: vec!["$ ls".into()],
-        shown: 0,
-        col: 0,
-        ticks: 0,
-        elapsed: 0,
     });
+    ed.agent_pane = Some(pane);
+    ed.poll_agent();
     let bar = badge(&mut ed);
     assert!(
         bar.contains(" terminal "),

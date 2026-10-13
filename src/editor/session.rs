@@ -80,9 +80,6 @@ pub(in crate::editor) fn loop_run(
     while !ed.should_quit {
         ed.tick_status();
         ed.poll_agent();
-        if ed.live_step_due(Instant::now()) {
-            ed.play_live();
-        }
         ed.poll_ai();
         ed.poll_check();
         ed.refresh_bootcamp_marks();

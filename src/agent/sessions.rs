@@ -1,7 +1,9 @@
 //! where the transcripts of a project live: the folder, a fresh file per run,
 //! the latest one to resume, and the whole list the memory box shows.
 
+use crate::provider::ToolCall;
 use crate::settings;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// Locates the folder where this project's saved sessions live.
@@ -41,4 +43,30 @@ pub fn sessions(root: &Path) -> Vec<PathBuf> {
     all.sort();
     all.reverse();
     all
+}
+
+/// the tool calls kept on a transcript line, none when the line has none.
+pub(crate) fn logged_tool_calls(line: &Value) -> Vec<ToolCall> {
+    let Some(calls) = line.get("tool_calls").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    calls
+        .iter()
+        .map(|c| ToolCall {
+            id: text_of(c, "id"),
+            name: text_of(c, "name"),
+            args: c
+                .get("args")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        })
+        .collect()
+}
+
+/// a string field of a json object, empty when missing.
+fn text_of(v: &Value, key: &str) -> String {
+    v.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }

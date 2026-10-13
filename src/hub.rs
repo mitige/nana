@@ -21,6 +21,7 @@ mod work;
 mod tests;
 
 use crate::company::{dispatch, plan_hiring};
+use crate::memory::magi;
 use crate::memory::{Class, Memory};
 use crate::persona;
 use crate::settings::{self, Settings};

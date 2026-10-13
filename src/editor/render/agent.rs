@@ -196,17 +196,17 @@ pub(in crate::editor) fn draw_agent(
 /// command is a terminal, a file is named by its language, anything else is
 /// the agent itself. the rule lives here so the badge never guesses elsewhere.
 pub(in crate::editor) fn agent_badge(ed: &Editor) -> (String, Color) {
-    match ed.live.first() {
-        Some(w) if crate::editor::is_action_view(&w.path) => {
-            let name = w.path.to_string_lossy();
+    match ed.agent_view.path.as_deref() {
+        Some(path) if crate::editor::is_action_view(path) => {
+            let name = path.to_string_lossy();
             if name.ends_with("run_shell") {
                 ("terminal".to_string(), Ed::amber())
             } else {
                 ("agent".to_string(), Ed::cyan())
             }
         }
-        Some(w) => {
-            let lang = crate::langs::for_path(&w.path);
+        Some(path) => {
+            let lang = crate::langs::for_path(path);
             (lang.name.to_string(), Color::Indexed(lang.color))
         }
         None => ("agent".to_string(), Ed::cyan()),

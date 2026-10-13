@@ -77,11 +77,17 @@ impl AiClient {
             .filter(|s| !s.is_empty())
             .or_else(|| cfg.ai_model.clone())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        Ok(Self {
+        Ok(Self::at(base_url, api_key, model))
+    }
+
+    /// Builds a client aimed at an explicit endpoint, with its key and model given
+    /// rather than read from the environment, so tests and callers pick the target.
+    pub fn at(base_url: String, api_key: String, model: String) -> Self {
+        Self {
             base_url,
             api_key,
             model,
-        })
+        }
     }
 
     /// Appel chat completions (non-streaming). Bloquant — à lancer dans un thread.
@@ -177,11 +183,16 @@ impl AiClient {
             .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
             .build()
             .into();
+        // sent as compact json: `send_json` would pretty-print the body, which
+        // costs tokens on every call and makes the wire text unreadable to a
+        // test that inspects it.
+        let payload =
+            serde_json::to_string(&body).map_err(|e| AiError::InvalidResponse(e.to_string()))?;
         let response = agent
             .post(&url)
             .header("Authorization", &format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
-            .send_json(&body);
+            .send(payload);
         match response {
             Ok(mut resp) => {
                 let value: serde_json::Value = resp

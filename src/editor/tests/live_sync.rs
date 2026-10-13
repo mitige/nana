@@ -1,58 +1,47 @@
-//! live sync tests of the editor screen.
+//! live sync tests of the editor screen: the agent's view can never fall
+//! behind the agent.
+//!
+//! the rule these tests hold is the one the user asked for: a write is shown
+//! whole the moment it arrives, so there is no queue, no duration and no way
+//! for the view to accumulate a lag. every test here would fail on the old
+//! playback, which replayed each write over the time the agent took to make it.
 
 use super::*;
 
-fn write_of(path: &str, text: Vec<String>, ticks: usize) -> LiveWrite {
+fn write_of(path: &str, text: Vec<String>) -> LiveWrite {
     LiveWrite {
         path: PathBuf::from(path),
         text,
-        shown: 0,
-        col: 0,
-        ticks,
-        elapsed: 0,
     }
 }
 
-/// the queue is bounded, not the duration: four long writes queued at once keep
-/// their own pace, none is dropped and none is shortened.
+/// a write is on screen in full as soon as the agent's event is polled: one
+/// poll, no frames in between.
 #[test]
-fn queued_long_writes_keep_their_duration() {
+fn a_write_is_on_screen_in_full_at_the_first_poll() {
     let mut ed = Editor::open(None).unwrap();
     let mut pane = AgentPane::new();
-    for _ in 0..4 {
-        pane.writes
-            .push(write_of("src/lib.rs", vec!["x".repeat(400)], 2000));
-    }
+    pane.writes
+        .push(write_of("a.rs", vec!["alpha".into(), "beta".into()]));
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    assert_eq!(ed.live.len(), 4, "no write is dropped");
-    assert!(
-        ed.live.iter().all(|w| w.ticks == 2000),
-        "a queued write was shortened"
-    );
+    assert_eq!(ed.agent_view.lines, vec!["alpha", "beta"]);
 }
 
-/// a flood of writes, each at the agent's own pace, is caught up: the queue is
-/// bounded, and the screen ends on the last thing the agent did.
+/// a flood does not queue: the screen shows the last write at once, and the
+/// number of frames it took is zero, because nothing is left to play.
 #[test]
-fn a_flood_of_writes_is_caught_up_and_the_screen_ends_on_the_last_one() {
+fn a_flood_never_queues_and_the_screen_ends_on_the_last_write() {
     let mut ed = Editor::open(None).unwrap();
     let mut pane = AgentPane::new();
     for i in 0..40 {
         pane.writes.push(write_of(
             &format!("f{i}.rs"),
             vec![format!("fn f{i}() {{}}")],
-            16,
         ));
     }
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    let mut frames = 0;
-    while !ed.live.is_empty() && frames < 100_000 {
-        ed.play_live();
-        frames += 1;
-    }
-    assert!(frames <= 400, "the flood took {frames} frames to show");
     assert_eq!(
         ed.agent_view.lines,
         vec!["fn f39() {}".to_string()],
@@ -60,57 +49,70 @@ fn a_flood_of_writes_is_caught_up_and_the_screen_ends_on_the_last_one() {
     );
 }
 
-/// the write on screen keeps its pace when a flood arrives behind it: its
-/// duration is never rewritten mid-line, or the text would jump ahead.
+/// the writes the pane handed over are consumed by the poll: nothing is held
+/// back for a later frame.
 #[test]
-fn the_write_on_screen_keeps_its_pace_when_a_flood_arrives() {
+fn no_write_is_held_back_for_a_later_frame() {
     let mut ed = Editor::open(None).unwrap();
     let mut pane = AgentPane::new();
-    pane.writes.push(write_of("a.rs", vec!["x".repeat(50)], 50));
+    for i in 0..5 {
+        pane.writes.push(write_of(
+            &format!("f{i}.rs"),
+            vec![format!("fn f{i}() {{}}")],
+        ));
+    }
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    for _ in 0..10 {
-        ed.play_live();
-    }
-    let mut flood = AgentPane::new();
-    for _ in 0..4 {
-        flood
-            .writes
-            .push(write_of("b.rs", vec!["y".repeat(400)], 2000));
-    }
-    ed.agent_pane = Some(flood);
-    ed.poll_agent();
-    assert_eq!(ed.live[0].ticks, 50, "the write on screen was rewritten");
+    assert!(
+        ed.agent_pane.as_ref().unwrap().writes.is_empty(),
+        "a write was left waiting in the pane"
+    );
 }
 
-/// a write that is alone in the queue keeps its duration, however long it is.
+/// however long the agent took to reach a write, nothing about the view waits:
+/// a second poll with no new event changes nothing and shows nothing new.
 #[test]
-fn a_lone_long_write_is_never_accelerated() {
+fn the_view_cannot_trail_behind_between_polls() {
     let mut ed = Editor::open(None).unwrap();
     let mut pane = AgentPane::new();
-    pane.writes
-        .push(write_of("a.rs", vec!["x".repeat(400)], 2000));
+    pane.writes.push(write_of("a.rs", vec!["x".repeat(400)]));
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    assert_eq!(ed.live[0].ticks, 2000, "a lone write was accelerated");
+    let shown = ed.agent_view.lines.clone();
+    for _ in 0..100 {
+        ed.poll_agent();
+    }
+    assert_eq!(ed.agent_view.lines, shown, "the view moved on its own");
 }
 
-/// queued writes still land in full: the last one written is the one left on
-/// screen, and nothing is cut from the text the agent wrote.
+/// the file of the write is named in the view, so the card says which file the
+/// agent is working on even when the write is not shown line by line.
 #[test]
-fn queued_writes_still_land_in_full() {
+fn the_view_names_the_file_of_the_write() {
     let mut ed = Editor::open(None).unwrap();
     let mut pane = AgentPane::new();
     pane.writes
-        .push(write_of("a.rs", vec!["alpha".into(), "beta".into()], 900));
-    pane.writes
-        .push(write_of("b.rs", vec!["gamma".repeat(60)], 900));
+        .push(write_of("src/pool.rs", vec!["fn one() {}".into()]));
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    let mut guard = 0;
-    while !ed.live.is_empty() && guard < 100_000 {
-        ed.play_live();
-        guard += 1;
-    }
-    assert_eq!(ed.agent_view.lines, vec!["gamma".repeat(60)]);
+    assert_eq!(
+        ed.agent_view.path.as_deref(),
+        Some(std::path::Path::new("src/pool.rs"))
+    );
+}
+
+/// the text the agent wrote is never cut, and the cursor sits at its end, so
+/// what the user reads is what the agent wrote.
+#[test]
+fn the_write_lands_in_full_with_the_cursor_at_its_end() {
+    let mut ed = Editor::open(None).unwrap();
+    let mut pane = AgentPane::new();
+    let long = "gamma".repeat(60);
+    pane.writes
+        .push(write_of("b.rs", vec!["alpha".into(), long.clone()]));
+    ed.agent_pane = Some(pane);
+    ed.poll_agent();
+    assert_eq!(ed.agent_view.lines, vec!["alpha", &long]);
+    assert_eq!(ed.agent_view.cy, 1, "the cursor is on the last line");
+    assert_eq!(ed.agent_view.cx, long.chars().count());
 }

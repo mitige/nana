@@ -47,6 +47,7 @@ fn main() {
         Some("--knowledge") => knowledge_cmd(&root, &args[1..]),
         Some("--dream") => dream_cmd(&root, &args[1..]),
         Some("--memory") => memory_cmd(&root, &args[1..]),
+        Some("--magi") => magi_cmd(&root, &args[1..]),
         Some("--persona") => persona_cmd(&root, &args[1..]),
         Some("--show-prompt") => show_prompt(&root, &args[1..]),
         Some("--agent") => run_agent(&root, &args[1..]),
@@ -77,6 +78,7 @@ usage: nana [file|dir]          open the editor
        nana --agent \"…\"        ask the agent to do something here
        nana --providers         list the model providers
        nana --memory …          the project's memory
+       nana --magi [--apply]      three sages judge the memory
        nana --company …         the company: hire, task, fire, mail
        nana --knowledge …       the project's wiki: list, show, search, write
        nana --dream [n]         consolidate the last sessions into the wiki
@@ -467,6 +469,42 @@ fn company_mail(root: &Path) -> i32 {
     0
 }
 
+/// Runs `nana --magi [--apply]`: the three sages read the project's memory and
+/// say what each of them would keep or forget. With `--apply` the pages the
+/// majority forgets are retired, their history kept; without it nothing is
+/// written at all. Hands back the process exit code.
+fn magi_cmd(root: &Path, rest: &[String]) -> i32 {
+    let mem = memory::Memory::open(root);
+    let apply = rest.iter().any(|a| a == "--apply");
+    let decisions = if apply {
+        memory::magi::run(&mem)
+    } else {
+        memory::magi::report(&mem)
+    };
+    let decisions = match decisions {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("nana: magi: {e}");
+            return 1;
+        }
+    };
+    if decisions.is_empty() {
+        println!(
+            "magi: this project has no memory to judge ({})",
+            mem.root().display()
+        );
+        return 0;
+    }
+    print!("{}", memory::magi::format_report(&decisions));
+    if apply {
+        let forgotten = decisions.iter().filter(|d| d.verdict.forgets()).count();
+        println!("magi: {forgotten} page(s) retired, each kept in the history");
+    } else {
+        println!("magi: nothing was changed; add --apply to retire");
+    }
+    0
+}
+
 /// Runs `nana --memory <sub>`: list, search, show, write and forget the pages of
 /// this project's memory. Hands back the process exit code.
 fn memory_cmd(root: &Path, rest: &[String]) -> i32 {
@@ -802,6 +840,12 @@ fn run_agent(root: &Path, rest: &[String]) -> i32 {
                 eprintln!("✎ {path}");
             }
         }
+        agent::Event::Retry {
+            attempt,
+            of,
+            wait_secs,
+            reason,
+        } => eprintln!("nana: {reason} — retry {attempt}/{of} in {wait_secs}s"),
         agent::Event::Finished { steps } => {
             if !quiet {
                 eprintln!("done in {steps} step(s) — transcript {}", session.display());

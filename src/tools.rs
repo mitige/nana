@@ -108,6 +108,30 @@ fn file_specs() -> Vec<ToolSpec> {
     ]
 }
 
+/// Puts the memory of the project to the three sages and returns their report,
+/// retiring nothing unless the caller asked to apply the verdict.
+fn magi(args: &Value, ctx: &Ctx) -> Result<String, String> {
+    let apply = args.get("apply").and_then(Value::as_bool).unwrap_or(false);
+    let decisions = if apply {
+        crate::memory::magi::run(&ctx.memory)?
+    } else {
+        crate::memory::magi::report(&ctx.memory)?
+    };
+    if decisions.is_empty() {
+        return Ok("magi: this project has no memory to judge".into());
+    }
+    let mut out = crate::memory::magi::format_report(&decisions);
+    if apply {
+        let forgotten = decisions.iter().filter(|d| d.verdict.forgets()).count();
+        out.push_str(&format!(
+            "magi: {forgotten} page(s) retired, each kept in the history\n"
+        ));
+    } else {
+        out.push_str("magi: nothing was changed; call again with apply to retire\n");
+    }
+    Ok(out)
+}
+
 /// the memory of the project: read, write, check and tidy the pages.
 fn memory_specs() -> Vec<ToolSpec> {
     let obj = |props: Value, required: Value| json!({"type": "object", "properties": props, "required": required});
@@ -165,6 +189,18 @@ fn memory_specs() -> Vec<ToolSpec> {
                           deleted or merged, that needs the user's approval."
                 .into(),
             parameters: obj(json!({}), json!([])),
+        },
+        ToolSpec {
+            name: "magi".into(),
+            description: "let the three sages (balthasar, casper, melchior) read the memory of \
+                          this project and say what they would keep or forget, and why. it only \
+                          reports unless \"apply\" is true, in which case the pages the majority \
+                          forgets are retired, their history kept."
+                .into(),
+            parameters: obj(
+                json!({"apply": {"type": "boolean", "description": "false by default: report only"}}),
+                json!([]),
+            ),
         },
         ToolSpec {
             name: "memory_check".into(),
@@ -261,6 +297,7 @@ fn arg_u64(args: &Value, key: &str) -> Option<u64> {
 /// run one tool call, and answer with text the model can read.
 pub fn run(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> {
     match name {
+        "magi" => magi(args, ctx),
         "read_file" => read_file(args, ctx),
         "write_file" => write_file(args, ctx),
         "edit_file" => edit_file(args, ctx),
@@ -884,6 +921,7 @@ mod tests {
                 "list_dir" => json!({}),
                 "grep" => json!({"pattern": "x"}),
                 "run_shell" => json!({"command": "true"}),
+                "magi" => json!({}),
                 "memory_list" => json!({}),
                 "memory_audit" => json!({}),
                 "memory_tidy" => json!({}),

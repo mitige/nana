@@ -143,3 +143,17 @@ fn f7_sur_un_fichier_ts_faux_affiche_la_premiere_erreur() {
         ed.status
     );
 }
+
+/// F7 and F8 pressed as keys, with the editor focused, must reach their
+/// handlers: a key that does nothing is the bug the student reports.
+#[test]
+fn f8_touche_pose_un_statut() {
+    let dir = std::env::temp_dir().join("nana-bootcamp-f8-key");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("hello.ts");
+    std::fs::write(&file, "const a: any = 1;\n").unwrap();
+    let mut ed = Editor::open(Some(file.as_path())).unwrap();
+    ed.status.clear();
+    ed.on_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::empty()));
+    assert!(ed.status.starts_with("bootcamp"), "statut : {}", ed.status);
+}

@@ -11,16 +11,9 @@ fn the_live_view_colours_code_by_its_language() {
     pane.writes.push(LiveWrite {
         path: PathBuf::from("src/lib.rs"),
         text: vec!["fn main() {".into()],
-        shown: 0,
-        col: 0,
-        ticks: 0,
-        elapsed: 0,
     });
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    while !ed.live.is_empty() {
-        ed.play_live();
-    }
     std::thread::sleep(VIEW_SWEEP);
     let backend = ratatui::backend::TestBackend::new(120, 40);
     let mut term = ratatui::Terminal::new(backend).unwrap();

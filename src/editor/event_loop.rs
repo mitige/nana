@@ -38,6 +38,7 @@ impl Editor {
                 .map(|p| p.root)
                 .unwrap_or_else(|| file_dir(self.file.as_deref()));
             let mut pane = AgentPane::new();
+            pane.conversation = self.conversation.clone();
             pane.persona = crate::settings::Settings::load(&root).persona;
             self.agent_pane = Some(pane);
             self.status = "agent — type a request, enter sends, esc closes".into();

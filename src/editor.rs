@@ -44,10 +44,13 @@ const CHECK_TTL: Duration = Duration::from_secs(10);
 const SLIDE_IN: Duration = Duration::from_millis(160);
 /// how long a toast lives, and how long it spends fading out.
 const TOAST_TTL: Duration = Duration::from_millis(3500);
-/// one playback tick is one frame of the animation loop, at about 60 fps.
-const TICK: Duration = Duration::from_millis(16);
+
 /// how long a new view takes to sweep in from the left.
 const VIEW_SWEEP: Duration = Duration::from_millis(240);
+/// how long the agent's own cursor stays on screen after its last write: long
+/// enough to read where it stopped, short enough that an idle card shows its
+/// file alone.
+pub(super) const AGENT_VIEW_HOLD: Duration = Duration::from_secs(8);
 /// how long the agent's cursor takes to glide from the line it left to the next.
 const CURSOR_GLIDE: Duration = Duration::from_millis(160);
 /// the spinner: ten braille frames, one every 80 ms.
@@ -199,49 +202,12 @@ struct AgentView {
     glide: Option<(usize, Instant)>,
 }
 
-/// a write in progress, played back: the text the agent is putting in a file,
-/// and how many of its lines are on screen so far.
+/// one write the agent made to a file: the text it put there, ready to be shown
+/// whole. nothing about it waits, so it cannot fall behind the agent.
 #[derive(Debug, Clone)]
 struct LiveWrite {
     path: PathBuf,
     text: Vec<String>,
-    shown: usize,
-    /// characters of line `shown` already on screen
-    col: usize,
-    /// ticks the whole text must take; 0 means one letter per tick
-    ticks: usize,
-    /// ticks played so far
-    elapsed: usize,
-}
-
-/// the frames a write lasts: the time the agent took to produce it, in ticks.
-/// a write that followed a long pause plays slowly; one that followed a quick
-/// step plays fast. nothing here is a fixed pace.
-fn ticks_for(waited: Duration) -> usize {
-    (waited.as_millis() / TICK.as_millis()).max(1) as usize
-}
-
-/// the most writes that may wait behind the one on screen. beyond it the oldest
-/// land at once: a flood must not turn into a queue the user watches for minutes.
-const MAX_QUEUE: usize = 24;
-
-/// keeps the queue short: past MAX_QUEUE waiting writes, the oldest land at
-/// once. no write is shortened by its duration, so a single long write plays
-/// at its own pace. a write already on screen is never touched: rewriting its
-/// duration mid-line would make its text jump ahead.
-fn catch_up(live: &mut [LiveWrite]) {
-    let n = live.len();
-    if n > MAX_QUEUE {
-        for w in live[..n - MAX_QUEUE].iter_mut().filter(|w| is_waiting(w)) {
-            w.ticks = 1;
-        }
-    }
-}
-
-/// whether a queued write has not started yet: it has a duration and no tick
-/// has been played, so shrinking it cannot change what is already on screen.
-fn is_waiting(w: &LiveWrite) -> bool {
-    w.ticks > 0 && w.elapsed == 0
 }
 
 /// Niveau d'une notification toast.
@@ -315,11 +281,9 @@ pub struct Editor {
     ai: Option<AiClient>,
     /// the agent panel (^a): a conversation with the project's agent
     agent_pane: Option<AgentPane>,
-    /// writes the agent announced, played back one line per step; the first is
-    /// the one on screen
-    live: Vec<LiveWrite>,
-    /// when the last letter of the playback was put on screen
-    live_stepped: Option<Instant>,
+    /// the conversation the agent card continues: it outlives the card, so
+    /// closing and opening it again does not wipe what the model knows
+    conversation: crate::agent::Conversation,
     /// the agent's own view of the file it writes or reads: a buffer and a
     /// cursor of its own, drawn behind the card, never in the user's buffer
     agent_view: AgentView,
@@ -489,8 +453,7 @@ impl Editor {
             ext,
             ai: None,
             agent_pane: None,
-            live: Vec::new(),
-            live_stepped: None,
+            conversation: crate::agent::Conversation::default(),
             agent_view: AgentView::default(),
             hub: None,
             explorer: None,

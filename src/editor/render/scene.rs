@@ -203,8 +203,29 @@ pub(in crate::editor) fn draw_agent_layer(
     editor_area: Rect,
     body_zone: Rect,
 ) {
+    // nothing plays back over time any more, so the cursor is shown while the
+    // agent works, while a glide is in flight, and while a new window sweeps
+    // in. an idle view shows its file, not a place where nothing happens.
+    let sweeping = ed
+        .agent_view
+        .opened
+        .map(|t| t.elapsed() < crate::editor::VIEW_SWEEP)
+        .unwrap_or(false);
+    let gliding = ed
+        .agent_view
+        .glide
+        .map(|(_, since)| since.elapsed() < crate::editor::CURSOR_GLIDE)
+        .unwrap_or(false);
+    let busy = ed.busy().is_some();
+    // a write just landed: its cursor stays readable for AGENT_VIEW_HOLD, then
+    // the view is a file like any other.
+    let fresh = ed
+        .agent_view
+        .opened
+        .map(|t| t.elapsed() < crate::editor::AGENT_VIEW_HOLD)
+        .unwrap_or(false);
     if let Some(pane) = &mut ed.agent_pane {
-        let playing = !ed.live.is_empty();
+        let playing = sweeping || gliding || busy || fresh;
         draw_agent_view(frame, &ed.agent_view, editor_area, playing);
         draw_agent(frame, pane, body_zone);
     }

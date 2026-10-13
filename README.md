@@ -237,6 +237,7 @@ refusal is shown too — nothing is hidden from you.
 | `grep` | search the project, `file:line` matches |
 | `run_shell` | run a command inside the project |
 | `memory_list` / `memory_read` / `memory_write` | the project's memory |
+| `magi` | let the three sages judge the memory, report only unless `apply` |
 
 two rules hold everywhere: **every path is resolved inside the project and
 checked**, and **a destructive command is refused**. `rm -rf`, `dd of=`,
@@ -273,6 +274,36 @@ nana --memory write project stack <<'EOF'
 rust, no async, every feature gets a test
 EOF
 ```
+
+### magi: the three sages that keep the memory honest
+
+memory grows in kinds, and each kind ages by its own clock: a conversation is
+cheap to rewrite, a card of the project is what we know, a page of the world
+model says where things stand. no single reader sees all of that, so the store
+is judged by three sages, one lens each, and the majority carries:
+
+| sage | lens | what it keeps |
+| --- | --- | --- |
+| balthasar | episodes | the conversations; the first to go when nothing links to them |
+| casper | cards | who you are, what you told the agent, the facts of the project |
+| melchior | world model | the links between pages; a page still pointed at is load-bearing |
+
+they are three because one reader is wrong in one way: balthasar forgets too
+eagerly, casper never forgets, melchior only sees the shape. a page another page
+links to survives whatever its date, and a sage never buries a page a brother
+kept. **a tie keeps the page** — forgetting is the one act we cannot undo
+cheaply, and a retired page keeps its history.
+
+the reward is a store that stays reading-sized without ever losing a card you
+wrote by hand: the user, feedback and project pages are the last to go.
+
+```sh
+nana --magi              # the report: each sage, each page, the verdict
+nana --magi --apply      # carry the verdict, the retired pages keep their history
+```
+
+the agent reaches the same council through the `magi` tool, and the memory box
+of the hub shows the kind of each page and the sage that keeps it.
 
 ### the wiki: what the project taught
 

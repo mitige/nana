@@ -61,122 +61,51 @@ impl Editor {
         self.status = "in progress… (esc : cancel)".into();
     }
 
-    /// collect what the agent worker produced, each frame.
+    /// collect what the agent worker produced, each frame. the writes are shown
+    /// at once, in the order the agent made them: nothing waits in a queue, so
+    /// the view can never trail behind what the agent has done.
     pub(super) fn poll_agent(&mut self) {
         if let Some(pane) = &mut self.agent_pane {
             pane.poll();
-            self.live.append(&mut pane.writes);
-            catch_up(&mut self.live);
+        }
+        let writes: Vec<LiveWrite> = self
+            .agent_pane
+            .as_mut()
+            .map(|p| p.writes.drain(..).collect())
+            .unwrap_or_default();
+        for write in writes {
+            self.show_write(write);
         }
         if let Some(hub) = &mut self.hub {
             hub.poll();
         }
     }
 
-    /// one step of a write in progress: the next line of the agent's text
-    /// lands in the buffer, the cursor follows it, and when the text is whole
-    /// the buffer is the saved file, so nothing reads as an unsaved edit.
-    /// the user has moved on (card closed, another file opened, the hub
-    /// taken): the playback stops where it is, what was shown stays shown.
-    pub(super) fn interrupt_live(&mut self) {
-        self.live.clear();
-    }
-
-    /// Plays the next queued agent write into the agent's own view, without touching the user's buffer, file or cursor.
-    /// Tells whether a playback step is due at `now`: one step per TICK of wall
-    /// time, so a loop that wakes on every key does not speed the write up.
-    /// Hands back true and records `now` when the step may run.
-    pub(super) fn live_step_due(&mut self, now: Instant) -> bool {
-        let due = match self.live_stepped {
-            None => true,
-            Some(at) => now.duration_since(at) >= TICK,
-        };
-        if due {
-            self.live_stepped = Some(now);
-        }
-        due
-    }
-
-    /// Plays the next queued agent write into the agent's own view, without touching the user's buffer, file or cursor.
-    pub(super) fn play_live(&mut self) {
-        let Some(w) = self.live.first_mut() else {
-            return;
-        };
-        // the agent's text goes to the agent's own view. the user's buffer,
-        // its file, its cursor and its unsaved work are never touched here.
-        // every action has its own window, as a file does: nothing is piled
-        // into a view shared with another action
-        let old_cy = self.agent_view.cy;
-        let mut fresh = false;
-        if w.shown == 0 && w.col == 0 {
-            fresh = true;
-            self.agent_view = AgentView {
-                path: Some(w.path.clone()),
-                lines: Vec::new(),
-                cy: 0,
-                cx: 0,
-                opened: Some(Instant::now()),
-                glide: None,
-            };
-            // the tree shows the file being worked on, as a person's cursor would
-            if let Some(ex) = &mut self.explorer {
-                if !is_action_view(&w.path) {
-                    ex.select_path(&w.path);
-                }
-            }
-        }
-        // the text lands against a cumulative target: after tick n of `ticks`,
-        // total * n / ticks letters are on screen, so the write ends on its
-        // last tick whatever its length. ticks 0 is one letter per tick, so
-        // the cursor moves along the line the way a person types.
-        let total: usize = w.text.iter().map(|l| l.chars().count()).sum();
-        let before: usize = w.text[..w.shown.min(w.text.len())]
-            .iter()
-            .map(|l| l.chars().count())
-            .sum::<usize>()
-            + w.col;
-        w.elapsed += 1;
-        let target = if w.ticks == 0 {
-            before + 1
+    /// Shows one agent write whole in the agent's own view, at once, without
+    /// touching the user's buffer, file or cursor. Every action has its own
+    /// window, as a file does, and the tree follows the file being worked on.
+    fn show_write(&mut self, w: LiveWrite) {
+        let last = w.text.len().saturating_sub(1);
+        // a write that spans lines glides: the cursor comes down from the line
+        // it was on, or from the first line of a window just opened, so the eye
+        // follows the agent instead of seeing the cursor jump.
+        let glide = if last > 0 {
+            Some((self.agent_view.cy.min(last), Instant::now()))
         } else {
-            (total * w.elapsed / w.ticks).min(total)
+            None
         };
-        let last_tick = w.ticks > 0 && w.elapsed >= w.ticks;
-        let mut revealed = before;
-        while w.shown < w.text.len() && (revealed < target || last_tick) {
-            let line = &w.text[w.shown];
-            let len = line.chars().count();
-            if w.col == 0 {
-                self.agent_view.lines.push(String::new());
+        self.agent_view = AgentView {
+            path: Some(w.path.clone()),
+            lines: w.text.clone(),
+            cy: last,
+            cx: w.text.last().map_or(0, |l| l.chars().count()),
+            opened: Some(Instant::now()),
+            glide,
+        };
+        if let Some(ex) = &mut self.explorer {
+            if !is_action_view(&w.path) {
+                ex.select_path(&w.path);
             }
-            if w.col < len {
-                if let (Some(ch), Some(out)) =
-                    (line.chars().nth(w.col), self.agent_view.lines.last_mut())
-                {
-                    out.push(ch);
-                }
-                w.col += 1;
-                revealed += 1;
-            }
-            if w.col >= len {
-                w.shown += 1;
-                w.col = 0;
-            }
-        }
-        // the cursor moved down a line: it glides from the line it left
-        let new_cy = self.agent_view.lines.len().saturating_sub(1);
-        if !fresh && !self.agent_view.lines.is_empty() && new_cy != old_cy {
-            self.agent_view.glide = Some((old_cy, Instant::now()));
-        }
-        if !self.agent_view.lines.is_empty() {
-            self.agent_view.cy = new_cy;
-            self.agent_view.cx = self.agent_view.lines[self.agent_view.cy].chars().count();
-        }
-        if w.shown >= w.text.len() {
-            if self.agent_view.lines.is_empty() {
-                self.agent_view.lines.push(String::new());
-            }
-            self.live.remove(0);
         }
     }
 
@@ -316,8 +245,7 @@ impl Editor {
 
     /// redraw fast while something moves, slowly when the screen is still.
     pub(super) fn animating(&self) -> bool {
-        !self.live.is_empty()
-            || self.busy().is_some()
+        self.busy().is_some()
             || self
                 .hub
                 .as_ref()

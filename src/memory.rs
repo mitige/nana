@@ -8,6 +8,7 @@
 
 mod calendar;
 mod consolidate;
+pub mod magi;
 #[cfg(test)]
 mod tests;
 
@@ -417,6 +418,15 @@ impl Memory {
     pub fn forget(&self, class: Class, name: &str) -> Result<(), String> {
         let path = self.safe_path(class, name)?;
         std::fs::remove_file(&path).map_err(|e| e.to_string())
+    }
+
+    /// Removes a page on a verdict, after copying it to the history so it can still be read back.
+    pub fn retire(&self, class: Class, name: &str) -> Result<(), String> {
+        let path = self.safe_path(class, name)?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        self.append_history(class, name, &today_iso(), &text);
+        self.forget(class, name)
     }
 
     /// every page, class by class.

@@ -12,14 +12,9 @@ impl Editor {
         match key.code {
             KeyCode::Esc => {
                 if pane.busy {
-                    pane.busy = false;
-                    pane.rx = None;
-                    pane.lines
-                        .push(("note".into(), "cancelled — the answer is dropped".into()));
-                    pane.status = "cancelled".into();
+                    pane.cancel();
                 } else {
                     self.agent_pane = None;
-                    self.interrupt_live();
                 }
             }
             // alt or shift + enter starts a new line of the prompt; enter sends it

@@ -27,14 +27,25 @@ impl Hub {
     }
 
     /// Lists the memory pages as items, each one opening its page when chosen.
+    /// the label stays `class: name`, which the rest of the hub matches on; the
+    /// kind of the page and the sage that keeps it go in the note, where they
+    /// are read without breaking a lookup by label.
     pub(super) fn memory_items(&self) -> Vec<Item> {
         Memory::open(&self.root)
             .list()
             .into_iter()
-            .map(|e| Item {
-                label: format!("{}: {}", e.class.id(), e.name),
-                note: e.title,
-                action: Action::ReadMemory(e.class, e.name),
+            .map(|e| {
+                let kind = magi::Kind::of(e.class, &e.name);
+                Item {
+                    label: format!("{}: {}", e.class.id(), e.name),
+                    note: format!(
+                        "{} — {} — kept by {}",
+                        e.title,
+                        kind.label(),
+                        kind.keeper().id()
+                    ),
+                    action: Action::ReadMemory(e.class, e.name),
+                }
             })
             .collect()
     }

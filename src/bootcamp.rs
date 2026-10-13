@@ -134,11 +134,47 @@ pub fn run_typescript_steps(file: &str) -> String {
     run_steps(&typescript_steps(file))
 }
 
+/// finds the program on the PATH, then in the npm global bin folder, because a
+/// desktop launch does not read the shell profile that adds that folder. It
+/// hands back the full path, or none when the program is nowhere.
+pub fn resolve_program(program: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let npm = npm_global_bin(
+        std::env::var("npm_config_prefix").ok(),
+        std::env::var_os("HOME"),
+    );
+    find_in(std::env::split_paths(&path).chain(npm), program)
+}
+
+/// hands back the first folder that holds the program, or none.
+pub fn find_in(
+    dirs: impl Iterator<Item = std::path::PathBuf>,
+    program: &str,
+) -> Option<std::path::PathBuf> {
+    dirs.map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
+}
+
+/// the npm global bin folder: the configured prefix when there is one, else
+/// the default `~/.npm-global` that the subject's setup uses.
+pub fn npm_global_bin(
+    prefix: Option<String>,
+    home: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    match prefix {
+        Some(prefix) => Some(std::path::PathBuf::from(prefix).join("bin")),
+        None => home.map(|home| std::path::PathBuf::from(home).join(".npm-global/bin")),
+    }
+}
+
 /// runs the given steps in order and hands back the verdict; the first failing
 /// step stops the run.
 pub fn run_steps(steps: &[Step]) -> String {
     for step in steps {
-        let output = std::process::Command::new(step.program)
+        let Some(program) = resolve_program(step.program) else {
+            return format!("{} is not installed", step.program);
+        };
+        let output = std::process::Command::new(program)
             .args(&step.args)
             .output();
         match output {
@@ -224,6 +260,38 @@ mod tests {
     fn broken_json_reports_the_two_pins_as_missing() {
         let found = package_findings("{ not json");
         assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn a_program_is_found_in_the_first_folder_that_holds_it() {
+        let dir = std::env::temp_dir().join(format!("nana-bootcamp-find-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let tool = dir.join("nana-test-tool");
+        std::fs::write(&tool, "").expect("temp tool");
+        let found = find_in(
+            vec![dir.join("absent"), dir.clone()].into_iter(),
+            "nana-test-tool",
+        );
+        assert_eq!(found, Some(tool));
+        assert_eq!(
+            find_in(std::iter::once(dir.clone()), "nana-no-such-tool"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_npm_global_bin_follows_the_prefix_or_the_home() {
+        let home = Some(std::ffi::OsString::from("/home/ev"));
+        assert_eq!(
+            npm_global_bin(None, home.clone()),
+            Some(std::path::PathBuf::from("/home/ev/.npm-global/bin"))
+        );
+        assert_eq!(
+            npm_global_bin(Some("/opt/npm".into()), home),
+            Some(std::path::PathBuf::from("/opt/npm/bin"))
+        );
+        assert_eq!(npm_global_bin(None, None), None);
     }
 }
 

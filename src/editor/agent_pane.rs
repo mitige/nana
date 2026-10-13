@@ -2,7 +2,6 @@
 //! the transcript it writes, and the text rules that keep it readable.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -18,6 +17,9 @@ pub(super) struct AgentPane {
     pub(super) lines: Vec<(String, String)>,
     pub(super) scroll: usize,
     pub(super) rx: Option<Receiver<crate::agent::Event>>,
+    /// the conversation every message of this card continues: one agent,
+    /// one history, so the model remembers the turns before
+    pub(super) conversation: crate::agent::Conversation,
     pub(super) busy: bool,
     pub(super) status: String,
     /// the persona this conversation runs under, read from the project
@@ -28,9 +30,6 @@ pub(super) struct AgentPane {
     pub(super) trail: Vec<crate::trail::Step>,
     /// when the card opened: the trail's clock starts here
     pub(super) started: std::time::Instant,
-    /// when the agent last produced anything: the time it took to reach the
-    /// next write is the time that write lasts on screen
-    pub(super) last_event: std::time::Instant,
     /// the tool calls waiting for their answer, oldest first, and whether each
     /// one's file was already announced (a write or a read plays as the file,
     /// not as a tool action). A queue, not one slot: the agent may call a
@@ -128,6 +127,7 @@ impl AgentPane {
             )],
             scroll: 0,
             rx: None,
+            conversation: crate::agent::Conversation::default(),
             busy: false,
             status: String::new(),
             persona: None,
@@ -138,7 +138,6 @@ impl AgentPane {
             closing: None,
             trail: Vec::new(),
             started: std::time::Instant::now(),
-            last_event: std::time::Instant::now(),
             pending: VecDeque::new(),
             transcript: TranscriptRows::default(),
         }
@@ -193,19 +192,23 @@ impl AgentPane {
         let (tx, rx) = channel();
         self.rx = Some(rx);
         let root = root.to_path_buf();
+        let conversation = self.conversation.clone();
         crate::guard::spawn_streaming(tx, move |tx| {
-            let settings = crate::settings::Settings::load(&root);
-            match crate::agent::Agent::new(&root, settings) {
-                Ok(mut agent) => {
-                    let _ = agent.run(&request, |event| {
-                        let _ = tx.send(event);
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(crate::agent::Event::Error(e));
-                }
-            }
+            let _ = conversation.turn(&root, &request, |event| {
+                let _ = tx.send(event);
+            });
         });
+    }
+
+    /// stops the turn in progress: the worker is told to halt at its next
+    /// step, and the card stops listening. the history so far is kept.
+    pub(super) fn cancel(&mut self) {
+        self.conversation.cancel();
+        self.busy = false;
+        self.rx = None;
+        self.lines
+            .push(("note".into(), "cancelled — the answer is dropped".into()));
+        self.status = "cancelled".into();
     }
 
     /// fold whatever the worker produced since the last frame.
@@ -215,10 +218,6 @@ impl AgentPane {
         };
         let mut done = false;
         while let Ok(event) = rx.try_recv() {
-            let waited = self.last_event.elapsed();
-            if !matches!(event, crate::agent::Event::ToolCall { .. }) {
-                self.last_event = Instant::now();
-            }
             match event {
                 crate::agent::Event::Started {
                     model, provider, ..
@@ -238,33 +237,7 @@ impl AgentPane {
                     self.pending.push_back((name, args, false));
                 }
                 crate::agent::Event::ToolResult { name, ok, text } => {
-                    self.record(
-                        crate::trail::Lane::Result,
-                        format!("{name}: {}", text.trim()),
-                        ok,
-                    );
-                    // every action is played, not only the files: a tool that
-                    // did not announce a file shows its call and its answer
-                    let answered = self.pending.iter().position(|(call, _, _)| *call == name);
-                    if let Some((call, args, shown)) = answered.and_then(|i| self.pending.remove(i))
-                    {
-                        if call == name && !shown {
-                            let mut text_lines = vec![terminal_header(&name, &args)];
-                            text_lines.extend(text.trim().lines().map(safe_text));
-                            self.writes.push(LiveWrite {
-                                path: PathBuf::from(format!("{ACTIONS_VIEW}: {name}")),
-                                text: text_lines,
-                                shown: 0,
-                                col: 0,
-                                ticks: ticks_for(waited),
-                                elapsed: 0,
-                            });
-                        }
-                    }
-                    self.lines.push((
-                        if ok { "ok".into() } else { "refused".into() },
-                        format!("{name}: {}", safe_text(text.trim())),
-                    ));
+                    self.tool_answered(&name, ok, &text);
                 }
                 crate::agent::Event::File { path, content, .. } => {
                     self.record(crate::trail::Lane::File, path.clone(), true);
@@ -274,13 +247,15 @@ impl AgentPane {
                     self.writes.push(LiveWrite {
                         path: PathBuf::from(&path),
                         text: content.lines().map(safe_text).collect(),
-                        shown: 0,
-                        col: 0,
-                        ticks: ticks_for(waited),
-                        elapsed: 0,
                     });
                     self.lines.push(("file".into(), safe_text(&path)));
                 }
+                crate::agent::Event::Retry {
+                    attempt,
+                    of,
+                    wait_secs,
+                    reason,
+                } => self.retrying(&format!("{reason} — retry {attempt}/{of} in {wait_secs}s")),
                 crate::agent::Event::Finished { steps } => {
                     self.status = format!("done in {steps} step(s)");
                     self.save_turn_now();
@@ -300,6 +275,38 @@ impl AgentPane {
         } else {
             self.busy = false;
         }
+    }
+
+    /// a tool answered: it goes on the trail and in the transcript, and a
+    /// tool that announced no file plays its call and its answer on screen.
+    fn tool_answered(&mut self, name: &str, ok: bool, text: &str) {
+        self.record(
+            crate::trail::Lane::Result,
+            format!("{name}: {}", text.trim()),
+            ok,
+        );
+        let answered = self.pending.iter().position(|(call, _, _)| call == name);
+        if let Some((_, args, shown)) = answered.and_then(|i| self.pending.remove(i)) {
+            if !shown {
+                let mut text_lines = vec![terminal_header(name, &args)];
+                text_lines.extend(text.trim().lines().map(safe_text));
+                self.writes.push(LiveWrite {
+                    path: PathBuf::from(format!("{ACTIONS_VIEW}: {name}")),
+                    text: text_lines,
+                });
+            }
+        }
+        self.lines.push((
+            if ok { "ok".into() } else { "refused".into() },
+            format!("{name}: {}", safe_text(text.trim())),
+        ));
+    }
+
+    /// a model call failed for a passing reason and will be asked again: the
+    /// card says so, so a wait reads as a retry and not as a frozen agent.
+    fn retrying(&mut self, note: &str) {
+        self.status = note.to_string();
+        self.lines.push(("note".into(), safe_text(note)));
     }
 }
 

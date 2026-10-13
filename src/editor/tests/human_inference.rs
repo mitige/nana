@@ -32,17 +32,29 @@ fn each_action_opens_its_own_window() {
     }
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    let paths: Vec<PathBuf> = ed.live.iter().map(|w| w.path.clone()).collect();
-    assert_eq!(paths.len(), 2, "two actions, two windows: {paths:?}");
-    assert_ne!(
-        paths[0], paths[1],
-        "two actions share one window: {paths:?}"
-    );
+    // no queue means the window shows the last action at once; each action
+    // still has its own window name, and the transcript keeps them all.
+    let last = ed
+        .agent_view
+        .path
+        .clone()
+        .expect("the last action has a window");
     assert!(
-        paths
-            .iter()
-            .all(|p| is_action_view(p) && p.to_string_lossy().contains(" ")),
-        "an action lost its own window name: {paths:?}"
+        is_action_view(&last) && last.to_string_lossy().contains(" "),
+        "an action lost its own window name: {last:?}"
+    );
+    let all = ed
+        .agent_pane
+        .as_ref()
+        .unwrap()
+        .lines
+        .iter()
+        .map(|(_, t)| t.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        all.contains("$ ls") && all.contains("ls src"),
+        "the two actions are not both recorded: {all}"
     );
 }
 
@@ -63,7 +75,6 @@ fn the_tree_selects_the_file_the_agent_writes() {
     .unwrap();
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    ed.play_live();
     let ex = ed.explorer.as_ref().unwrap();
     let picked = ex.rows()[ex.sel()].path.clone();
     assert!(

@@ -33,7 +33,6 @@ impl Editor {
             self.status = "buffer modified — ^s to save first".into();
             return;
         }
-        self.interrupt_live();
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();

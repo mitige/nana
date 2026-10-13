@@ -24,11 +24,6 @@ fn every_tool_action_is_played_as_a_terminal_line() {
     .unwrap();
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    let mut guard = 0;
-    while !ed.live.is_empty() && guard < 10_000 {
-        ed.play_live();
-        guard += 1;
-    }
     let shown = ed.agent_view.lines.join("\n");
     assert!(
         shown.contains("$ ls src"),
@@ -59,11 +54,6 @@ fn a_shell_command_is_played_as_a_terminal_session() {
     .unwrap();
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    let mut guard = 0;
-    while !ed.live.is_empty() && guard < 10_000 {
-        ed.play_live();
-        guard += 1;
-    }
     let shown = ed.agent_view.lines.join("\n");
     assert!(
         shown.contains("$ ls"),
@@ -129,11 +119,6 @@ fn a_shell_action_on_screen_has_no_file_gutter_and_no_machine_title() {
     .unwrap();
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    let mut guard = 0;
-    while !ed.live.is_empty() && guard < 10_000 {
-        ed.play_live();
-        guard += 1;
-    }
     ed.agent_view.opened = Some(Instant::now() - VIEW_SWEEP * 2);
     let screen = render_rows(&mut ed, 120, 40).join("\n");
     assert!(

@@ -123,7 +123,6 @@ impl Editor {
 
     /// load a file into the buffer, wherever it comes from.
     pub(super) fn open_path(&mut self, path: std::path::PathBuf) {
-        self.interrupt_live();
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 self.snapshot();
@@ -188,6 +187,7 @@ impl Editor {
             crate::hub::Action::RunSkill(name) => {
                 self.hub = None;
                 let mut pane = AgentPane::new();
+                pane.conversation = self.conversation.clone();
                 pane.persona = crate::settings::Settings::load(&root).persona;
                 pane.input = format!("follow the {name} skill");
                 self.agent_pane = Some(pane);

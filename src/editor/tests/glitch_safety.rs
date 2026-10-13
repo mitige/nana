@@ -78,11 +78,6 @@ fn the_agent_screen_never_holds_a_control_byte() {
         .unwrap();
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    let mut guard = 0;
-    while !ed.live.is_empty() && guard < 10_000 {
-        ed.play_live();
-        guard += 1;
-    }
     std::thread::sleep(VIEW_SWEEP);
     let text = render_text(&mut ed, 160, 40);
     let bad: Vec<char> = text.chars().filter(|c| c.is_control()).collect();
@@ -112,19 +107,15 @@ fn the_agent_cursor_sits_after_the_last_letter_it_wrote() {
     pane.writes.push(LiveWrite {
         path: PathBuf::from("src/lib.rs"),
         text: vec!["abc".into()],
-        shown: 0,
-        col: 0,
-        ticks: 0,
-        elapsed: 0,
     });
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    ed.play_live();
-    ed.play_live();
     std::thread::sleep(VIEW_SWEEP);
     // the number gutter is 5 columns, the box border one: the text starts at x 6.
     // rows: the header and the card's top border sit above the first line, row 3
-    assert_eq!(reversed_cells(&mut ed, 160, 40), vec![(8, 3)]);
+    // the write is whole at once, so the block sits right after all three
+    // letters: the text starts at x 6, so after "abc" it is at x 9.
+    assert_eq!(reversed_cells(&mut ed, 160, 40), vec![(9, 3)]);
 }
 
 /// the cursor does not jump: when the agent moves to the next line, it
@@ -141,14 +132,6 @@ fn the_cursor_glides_from_the_line_it_left_to_the_next() {
         opened: Some(Instant::now() - VIEW_SWEEP * 2),
         glide: Some((0, Instant::now() - CURSOR_GLIDE / 2)),
     };
-    ed.live.push(LiveWrite {
-        path: PathBuf::from("src/lib.rs"),
-        text: vec!["x".into()],
-        shown: 0,
-        col: 0,
-        ticks: 0,
-        elapsed: 0,
-    });
     // half-way: between line 1 (row 3) and line 3 (row 5), so on row 4
     assert_eq!(reversed_cells(&mut ed, 160, 40), vec![(6, 4)]);
     ed.agent_view.glide = None;
@@ -164,18 +147,9 @@ fn a_new_line_starts_a_glide_from_the_old_one() {
     pane.writes.push(LiveWrite {
         path: PathBuf::from("src/lib.rs"),
         text: vec!["abc".into(), "def".into()],
-        shown: 0,
-        col: 0,
-        ticks: 0,
-        elapsed: 0,
     });
     ed.agent_pane = Some(pane);
     ed.poll_agent();
-    let mut guard = 0;
-    while ed.agent_view.cy == 0 && !ed.live.is_empty() && guard < 100 {
-        ed.play_live();
-        guard += 1;
-    }
-    assert_eq!(ed.agent_view.cy, 1, "the cursor reached the second line");
+    assert_eq!(ed.agent_view.cy, 1, "the cursor is on the second line");
     assert_eq!(ed.agent_view.glide.map(|(from, _)| from), Some(0));
 }

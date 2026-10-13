@@ -92,3 +92,25 @@ fn wrapping_keeps_every_word() {
     // a newline in the answer starts a new line
     assert_eq!(wrap("a\nb", 40).len(), 2);
 }
+
+/// closing the card and opening it again continues the same conversation:
+/// the model still has the turns sent before the card was closed.
+#[test]
+fn reopening_the_card_keeps_the_conversation() {
+    let d = scratch("agent-reopen");
+    let mut agent = crate::agent::Agent::with_client(
+        &d,
+        crate::settings::Settings::default(),
+        crate::provider::Client::local("http://127.0.0.1:1", "m"),
+    );
+    agent
+        .messages
+        .push(crate::provider::Msg::user("remember rutabaga"));
+    let mut ed = Editor::open(None).unwrap();
+    ed.conversation = crate::agent::Conversation::with_agent(agent);
+    ed.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    ed.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    ed.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    let pane = ed.agent_pane.as_ref().expect("the card is open again");
+    assert_eq!(pane.conversation.history_len(), 1, "the history came back");
+}

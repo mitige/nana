@@ -1,6 +1,8 @@
 //! the editor's own tests: each one pins a rule the screen must keep, one file per topic.
 
 use super::*;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 
 /// the frame, row by row: the plain text helper loses the line breaks, and a
 /// layout bug is exactly a question of which row something lands on.
@@ -73,3 +75,78 @@ mod status_badge_follows_the_agent;
 mod statusbar_background;
 mod tab;
 mod terminal_look;
+
+/// waits for one client, but gives up after `limit`: a test whose request never
+/// comes must fail in seconds, not hang the whole suite. Returns none on timeout.
+fn accept_within(
+    listener: &TcpListener,
+    limit: std::time::Duration,
+) -> Option<std::net::TcpStream> {
+    listener.set_nonblocking(true).ok()?;
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match listener.accept() {
+            Ok((sock, _)) => {
+                sock.set_nonblocking(false).ok()?;
+                return Some(sock);
+            }
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// a fake openai-compatible server: answers once with `answer` and hands back the request it got.
+fn mock(answer: &'static str) -> (String, std::thread::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let Some(mut sock) = accept_within(&listener, std::time::Duration::from_secs(5)) else {
+            return String::new();
+        };
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .ok();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let mut head: Option<usize> = None;
+        let mut want = 0usize;
+        loop {
+            if let Some(h) = head {
+                if buf.len() >= h + want {
+                    break;
+                }
+            }
+            match sock.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+            if head.is_none() {
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    head = Some(i + 4);
+                    let h = String::from_utf8_lossy(&buf[..i]).to_ascii_lowercase();
+                    want = h
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                }
+            }
+        }
+        let req = String::from_utf8_lossy(&buf).to_string();
+        let payload = format!(
+            "{{\"choices\":[{{\"message\":{{\"content\":{}}}}}]}}",
+            serde_json::to_string(answer).unwrap()
+        );
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        let _ = sock.write_all(resp.as_bytes());
+        req
+    });
+    (format!("http://{addr}"), handle)
+}

@@ -46,10 +46,17 @@ pub(crate) fn context_chars(system: &str, msgs: &[Msg]) -> usize {
 }
 
 /// a hard ceiling on the context of one turn. when the sum is over it, the
-/// oldest tool results are cut to their head first, one after the other,
-/// until the sum fits. the user messages are never cut, and the newest result
-/// is the last one touched.
-pub(crate) fn cap_context(system: &str, msgs: &mut [Msg], cap: usize) {
+/// oldest tool results are cut to their head first; when that is not enough,
+/// the oldest whole turns go, so a long conversation keeps going instead of
+/// being refused by the provider. the newest turn is never dropped.
+pub(crate) fn cap_context(system: &str, msgs: &mut Vec<Msg>, cap: usize) {
+    cut_old_results(system, msgs, cap);
+    drop_oldest_turns(system, msgs, cap);
+}
+
+/// cuts the oldest tool results to their head, one after the other, until
+/// the sum fits or no result is left to cut.
+fn cut_old_results(system: &str, msgs: &mut [Msg], cap: usize) {
     let mut over = context_chars(system, msgs).saturating_sub(cap);
     if over == 0 {
         return;
@@ -74,5 +81,62 @@ pub(crate) fn cap_context(system: &str, msgs: &mut [Msg], cap: usize) {
             "{head}\n[... {cut} characters elided to keep the context under its cap; run the tool again to see them]"
         );
         over = over.saturating_sub(cut);
+    }
+}
+
+/// drops the oldest turn (a question and all that answered it) while the
+/// sum is over the cap. a turn starts at a user message, so a tool answer
+/// is never parted from its call.
+fn drop_oldest_turns(system: &str, msgs: &mut Vec<Msg>, cap: usize) {
+    while context_chars(system, msgs) > cap {
+        let next_turn = msgs
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, m)| m.role == Role::User)
+            .map(|(i, _)| i);
+        match next_turn {
+            Some(i) => {
+                msgs.drain(..i);
+            }
+            None => break,
+        }
+    }
+}
+
+/// a history the provider accepts: every tool answer follows the call it
+/// answers, and every call has its answer. transcripts written before the
+/// calls were kept hold answers alone, and one of those fails the whole turn.
+pub(crate) fn pair_tool_messages(msgs: &mut Vec<Msg>) {
+    let mut paired: Vec<Msg> = Vec::with_capacity(msgs.len());
+    let mut open: Vec<String> = Vec::new();
+    for m in msgs.drain(..) {
+        match m.role {
+            Role::Tool => {
+                let id = m.tool_call_id.clone().unwrap_or_default();
+                if let Some(at) = open.iter().position(|c| *c == id) {
+                    open.remove(at);
+                    paired.push(m);
+                }
+            }
+            _ => {
+                unanswered_calls_closed(&mut paired, &open);
+                open = m.tool_calls.iter().map(|c| c.id.clone()).collect();
+                paired.push(m);
+            }
+        }
+    }
+    unanswered_calls_closed(&mut paired, &open);
+    *msgs = paired;
+}
+
+/// answers the calls left open (a run cut mid-step) with a note, so the
+/// request after them is still well formed.
+fn unanswered_calls_closed(msgs: &mut Vec<Msg>, open: &[String]) {
+    for id in open {
+        msgs.push(Msg::tool(
+            id,
+            "no answer: the run stopped before this call ran",
+        ));
     }
 }
