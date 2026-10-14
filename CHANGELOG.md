@@ -1,5 +1,9 @@
 # changelog
 
+## 2.6.0
+
+- custom endpoints: `ctrl+w` in the providers box adds one of your own — `id url [key env] [kind]`, kind being openai, anthropic or gemini. it lands in `.nana/settings.json`, joins the built-in rows, and can be picked with enter like any other. a custom id that matches a built-in one shadows it. `nana --providers` lists them too, custom rows last.
+
 ## 2.5.0
 
 - magi: three sages judge the project's memory, each with one lens. balthasar keeps the conversations, casper the cards (user, feedback, project), melchior the world model. a page another page links to survives whatever its date, a sage never buries a page a brother kept, and a tie keeps the page. a retired page keeps its history. reachable as `nana --magi [--apply]` and as the `magi` tool of the agent.

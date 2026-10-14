@@ -58,6 +58,11 @@ impl Hub {
                 self.refresh();
                 Ok(Outcome::Say(msg))
             }
+            Action::SetProvider(id) => {
+                let msg = apply(&self.root, &Action::SetProvider(id))?;
+                self.refresh();
+                Ok(Outcome::Say(msg))
+            }
             Action::RunSkill(name) => Ok(Outcome::Say(format!("skill {name}"))),
             Action::ReadMemory(_, _) | Action::ReadKnowledge(_) | Action::None => Ok(Outcome::None),
         }
@@ -122,6 +127,9 @@ impl Hub {
                 std::fs::remove_file(&path).map_err(|e| e.to_string())?;
                 format!("skill {name} deleted")
             }
+            // a provider row is a setting, not a file: there is nothing to
+            // delete, and firing the endpoint would be nonsense
+            Action::SetProvider(_) => return Ok(String::new()),
             _ => {
                 // in the company box, delete means fire
                 let name = item.label.trim().trim_start_matches('●').trim().to_string();

@@ -21,6 +21,8 @@ pub enum Purpose {
     Task(String),
     /// the model to use from now on
     SetModel,
+    /// a custom endpoint, written as "id base_url [key env]"
+    NewProvider,
 }
 
 impl Purpose {
@@ -36,6 +38,7 @@ impl Purpose {
             Purpose::Hire => "mission for the ceo".into(),
             Purpose::Task(who) => format!("task for {who}"),
             Purpose::SetModel => "model".into(),
+            Purpose::NewProvider => "custom provider: id url [key env] [kind]".into(),
         }
     }
 

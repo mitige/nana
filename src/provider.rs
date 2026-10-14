@@ -14,6 +14,10 @@ use crate::settings::Settings;
 use serde_json::{json, Value};
 use std::path::Path;
 
+mod endpoint;
+
+pub use endpoint::Endpoint;
+
 /// post json and read json back, turning every failure into a sentence.
 macro_rules! send_json {
     ($req:expr, $body:expr) => {{
@@ -41,6 +45,27 @@ pub enum Kind {
     Anthropic,
     /// POST {base}/v1beta/models/{model}:generateContent, key in the query
     Gemini,
+}
+
+impl Kind {
+    /// how this kind is written in settings.json and in the ui.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Kind::OpenAi => "openai",
+            Kind::Anthropic => "anthropic",
+            Kind::Gemini => "gemini",
+        }
+    }
+
+    /// Reads a kind back from settings.json. an unknown or missing word means
+    /// the openai-compatible shape, which is what "custom endpoint" implies.
+    pub fn from_name(name: &str) -> Kind {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "anthropic" => Kind::Anthropic,
+            "gemini" | "google" => Kind::Gemini,
+            _ => Kind::OpenAi,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -264,7 +289,7 @@ pub struct ToolSpec {
 }
 
 pub struct Client {
-    pub provider: &'static Provider,
+    pub provider: Endpoint,
     pub base_url: String,
     pub model: String,
     api_key: Option<String>,
@@ -282,20 +307,16 @@ impl Client {
             .clone()
             .or_else(|| std::env::var("NANA_MODEL").ok())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        let provider = settings
-            .provider
-            .as_deref()
-            .and_then(by_id)
-            .unwrap_or_else(|| detect(&model));
+        let provider = Endpoint::resolve(settings, &model);
         let base_url = settings
             .base_url
             .clone()
             .or_else(|| std::env::var("NANA_BASE_URL").ok())
-            .unwrap_or_else(|| provider.base_url.to_string());
+            .unwrap_or_else(|| provider.base_url.clone());
         let key_env = settings
             .api_key_env
             .clone()
-            .or_else(|| provider.key_env.map(str::to_string));
+            .or_else(|| provider.key_env.clone());
         // the key is looked up for its own provider, never borrowed from
         // another one: a dashscope key has no business in an anthropic header
         let mut api_key = key_env
@@ -307,7 +328,7 @@ impl Client {
         }
         // a local endpoint (a mock, or your own gateway) does not want a key
         let local = base_url.contains("127.0.0.1") || base_url.contains("localhost");
-        if api_key.is_none() && !provider.keyless && !local {
+        if api_key.is_none() && provider.key_env.is_some() && !local {
             return Err(format!(
                 "no api key for {} — set {} or add it to ~/.dsh/.credentials.yaml",
                 provider.id,
@@ -350,7 +371,7 @@ impl Client {
             .build()
             .into();
         Client {
-            provider: by_id("openai-compatible").unwrap(),
+            provider: Endpoint::of(detect("")),
             base_url: base_url.to_string(),
             model: model.to_string(),
             api_key: None,
@@ -918,7 +939,9 @@ mod tests {
                 "usage":{"input_tokens":3,"output_tokens":4}}"#,
         );
         let mut c = Client::local(&url, "claude-sonnet-4").with_api_key("k");
-        c.provider = by_id("anthropic").unwrap();
+        // no built-in base url here: the mock answers, but the wire shape must
+        // be anthropic's, so the kind is pinned by hand
+        c.provider.kind = Kind::Anthropic;
         let reply = c.chat("sys", &[Msg::user("hi")], &[]).unwrap();
         assert_eq!(reply.text, "salut");
         assert_eq!(reply.tool_calls[0].name, "grep");
@@ -939,7 +962,7 @@ mod tests {
                 "usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":6}}"#,
         );
         let mut c = Client::local(&url, "gemini-2.5-flash");
-        c.provider = by_id("gemini").unwrap();
+        c.provider.kind = Kind::Gemini;
         let reply = c.chat("sys", &[Msg::user("hi")], &[]).unwrap();
         assert_eq!(reply.text, "hey");
         assert_eq!(reply.tool_calls[0].args["path"], "b");

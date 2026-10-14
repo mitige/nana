@@ -2,7 +2,7 @@
 
 an adaptive terminal editor. one buffer, every language.
 
-version 2.5.0
+version 2.6.0
 
 ![nana, the welcome screen](docs/shots/test1.png)
 
@@ -19,7 +19,7 @@ it is written in rust, it is a single static binary, and it starts instantly.
 ## why
 
 most editors make you configure languages one by one. nana ships the knowledge
-instead: **107 languages**, their comment syntax, their checker, their run
+instead: **105 languages**, their comment syntax, their checker, their run
 recipe, their formatter, their icon — plus project detection for the common
 build systems and frameworks. the whole table lives in one file
 ([`src/langs.rs`](src/langs.rs)), so adding a language is adding a row.
@@ -101,8 +101,9 @@ nana src          # opens a directory
 
 ## languages
 
-107 rows today. the checker column is what `ctrl+b` runs; the run column is
-what `f5` runs for a single file (in a project, the project command wins).
+a selection of the 105, common ones first. the checker column is what `ctrl+b`
+runs; the run column is what `f5` runs for a single file (in a project, the
+project command wins).
 
 | language | extensions | checker | run |
 | --- | --- | --- | --- |
@@ -148,7 +149,7 @@ the full list, generated from the registry:
 nana --languages
 ```
 
-107 languages, from ada to zig, including the ones people forget: forth, cobol,
+105 languages, from ada to zig, including the ones people forget: forth, cobol,
 prolog, smalltalk, brainfuck-adjacent oddities aside — webassembly (`wat`),
 llvm ir (`ll`), glsl and wgsl for the gpu, protobuf, thrift, graphql, terraform,
 ansible, nginx, vimscript, emacs lisp, org, restructuredtext, asciidoc, typst,
@@ -220,7 +221,7 @@ the card shows the whole exchange as it happens:
 you   read src/langs.rs and tell me how many languages the registry declares
 ->    read_file {"path": "src/langs.rs"}
 ok    read_file 1 | //! the language registry.
-nana  the registry declares 107 languages, including forth, cobol and prolog.
+nana  the registry declares 105 languages, including forth, cobol and prolog.
 ```
 
 the answer streams in, the tool calls are shown with their arguments, and a
@@ -334,7 +335,7 @@ would otherwise send you to a shell happens here.
 | --- | --- |
 | memory | read a page, write a new one, edit it, forget it |
 | knowledge | read a wiki page, write one, dream over the last sessions |
-| providers | see who can answer, pick the model with a keystroke |
+| providers | see who can answer, pick the endpoint with a keystroke, add your own with `ctrl+w` |
 | skills | read one, run it (it hands itself to the agent), write a new one |
 | personas | read it, use it by default, edit it, delete it |
 | agents | the company: hire, give work, fire, follow the mailbox |
@@ -347,6 +348,7 @@ keys inside the hub:
 | `←` `→` | change box |
 | `enter` | act on the selection, or answer what the box is asking |
 | `ctrl+n` | new: a memory page, a persona, a skill, or a mission for the ceo |
+| `ctrl+w` | add a custom endpoint, from the providers box |
 | `ctrl+e` | edit the file behind the selection, right here in nana |
 | `ctrl+d` | delete it: forget a page, delete a persona, fire an employee |
 | `ctrl+t` | give the selected employee a task |
@@ -423,6 +425,38 @@ to point nana at anything: `.nana/settings.json`
 ```json
 { "model": "llama3.1", "base_url": "http://127.0.0.1:11434/v1" }
 ```
+
+you can also keep several endpoints of your own, side by side with the
+built-in ones. in the **providers box of the hub** (`ctrl+w`), select an
+endpoint and press enter to make it answer, or press `ctrl+w` to add one:
+
+```
+gw https://gw.example/v1 GW_KEY anthropic
+```
+
+that is `id url [key env] [kind]`, kind being `openai` (the default),
+`anthropic` or `gemini`; a `-` where the key goes means the endpoint wants no
+key. the same thing, written out, is:
+
+```json
+{
+  "model": "gw-large",
+  "provider": "gw",
+  "providers": {
+    "gw": {
+      "kind": "openai",
+      "label": "my gateway",
+      "base_url": "https://gw.example/v1",
+      "api_key_env": "GW_KEY",
+      "models": ["gw-large"]
+    }
+  }
+}
+```
+
+a `models` entry makes a model pick the endpoint by itself, with no
+`provider` line. a custom id replaces the built-in provider of the same name,
+and `nana --providers` lists them all, the one answering marked with `*`.
 
 ### personas
 
@@ -538,7 +572,7 @@ final_newline = true
 ## development
 
 ```sh
-cargo test        # 342 tests, no network, no fixtures to download
+cargo test        # 414 tests, no network, no fixtures to download
 cargo run         # the editor, on this repository
 cargo run -- --languages
 ```

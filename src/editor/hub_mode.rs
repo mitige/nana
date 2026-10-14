@@ -53,6 +53,21 @@ impl Editor {
                     h.begin(p);
                 }
             }
+            // ctrl+w: add an endpoint of your own, from the providers box
+            KeyCode::Char('w') if ctrl => {
+                let providers = self
+                    .hub
+                    .as_ref()
+                    .map(|h| h.current() == crate::hub::Section::Providers)
+                    .unwrap_or(false);
+                if providers {
+                    if let Some(h) = self.hub.as_mut() {
+                        h.begin(crate::hub::Purpose::NewProvider);
+                    }
+                } else {
+                    self.status = "ctrl+w adds a provider — open the providers box first".into();
+                }
+            }
             KeyCode::Char('e') if ctrl => self.hub_edit(),
             KeyCode::Char('d') if ctrl => self.hub_delete(),
             KeyCode::Char('t') if ctrl => self.hub_task(),

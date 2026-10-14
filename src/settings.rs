@@ -37,11 +37,53 @@ pub struct Settings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderCfg {
-    /// "openai" | "anthropic" | "gemini" | "ollama"
+    /// "openai" | "anthropic" | "gemini"; anything else means openai-compatible
     pub kind: String,
+    /// the name shown in the hub, when the id is not enough
+    pub label: Option<String>,
     pub base_url: String,
+    /// environment variable holding the key; an empty string means no key
     pub api_key_env: Option<String>,
+    /// model names this endpoint serves, so a model picks it by itself
     pub models: Vec<String>,
+}
+
+impl ProviderCfg {
+    /// Reads one custom endpoint from a line typed in the hub, in the form
+    /// `id url [key env] [kind]`, and hands back its id with its settings.
+    ///
+    /// A `-` where the key env goes means the endpoint wants no key at all;
+    /// `kind` is `openai` (the default), `anthropic` or `gemini`. The error
+    /// spells the form out again, because that is the only place the user
+    /// learns it.
+    pub fn parse(line: &str) -> Result<(String, ProviderCfg), String> {
+        let form = "usage: id url [key env] [kind] — e.g. gw https://gw.example/v1 GW_KEY";
+        let mut words = line.split_whitespace();
+        let id = words.next().ok_or_else(|| form.to_string())?.to_string();
+        let base_url = words.next().ok_or_else(|| form.to_string())?.to_string();
+        if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+            return Err(format!("{base_url} is not an http url — {form}"));
+        }
+        let key = words.next().unwrap_or("NANA_API_KEY");
+        let kind = words.next().unwrap_or("openai");
+        if words.next().is_some() {
+            return Err(form.to_string());
+        }
+        Ok((
+            id,
+            ProviderCfg {
+                kind: kind.to_string(),
+                label: None,
+                base_url,
+                api_key_env: Some(if key == "-" {
+                    String::new()
+                } else {
+                    key.into()
+                }),
+                models: Vec::new(),
+            },
+        ))
+    }
 }
 
 impl Settings {
@@ -191,5 +233,33 @@ mod tests {
         let s = Settings::load(&d);
         assert!(s.model.is_none());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_typed_provider_line_becomes_a_custom_endpoint() {
+        let (id, cfg) = ProviderCfg::parse("gw https://gw.example/v1 GW_KEY anthropic").unwrap();
+        assert_eq!(id, "gw");
+        assert_eq!(cfg.base_url, "https://gw.example/v1");
+        assert_eq!(cfg.api_key_env.as_deref(), Some("GW_KEY"));
+        assert_eq!(cfg.kind, "anthropic");
+    }
+
+    #[test]
+    fn a_typed_provider_line_defaults_to_openai_and_the_usual_key_var() {
+        let (_, cfg) = ProviderCfg::parse("gw https://gw.example/v1").unwrap();
+        assert_eq!(cfg.kind, "openai");
+        assert_eq!(cfg.api_key_env.as_deref(), Some("NANA_API_KEY"));
+        // a dash where the key goes means this endpoint wants no key at all
+        let (_, cfg) = ProviderCfg::parse("gw http://127.0.0.1:8000/v1 -").unwrap();
+        assert_eq!(cfg.api_key_env.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn a_typed_provider_line_that_makes_no_sense_is_refused() {
+        // too few words, a non-http url, and too many words
+        for bad in ["gw", "gw gw.example/v1", "gw https://x/v1 KEY openai extra"] {
+            let err = ProviderCfg::parse(bad).unwrap_err();
+            assert!(err.contains("usage"), "{bad} gave {err}");
+        }
     }
 }

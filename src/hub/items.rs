@@ -87,21 +87,28 @@ impl Hub {
         out
     }
 
-    /// Lists the providers as items, the one matching the current model marked with a dot.
+    /// Lists the endpoints as items: every built-in, then every custom one you
+    /// added. The one answering the current model wears a dot, and enter
+    /// routes the model to the endpoint you pick.
     pub(super) fn provider_items(&self) -> Vec<Item> {
         let s = self.settings();
         let current = s
             .model
             .clone()
             .unwrap_or_else(|| crate::provider::DEFAULT_MODEL.into());
-        crate::provider::PROVIDERS
-            .iter()
-            .map(|p| {
-                let picked = crate::provider::detect(&current).id == p.id;
+        let answering = crate::provider::Endpoint::resolve(&s, &current).id;
+        crate::provider::Endpoint::all(&s)
+            .into_iter()
+            .map(|e| {
+                let picked = e.id == answering;
+                let mut note = format!("{} · {}", e.label, e.base_url);
+                if e.custom {
+                    note.push_str(" · custom");
+                }
                 Item {
-                    label: format!("{}{}", if picked { "● " } else { "  " }, p.id),
-                    note: format!("{} · {}", p.label, p.base_url),
-                    action: Action::None,
+                    label: format!("{}{}", if picked { "● " } else { "  " }, e.id),
+                    note,
+                    action: Action::SetProvider(e.id.clone()),
                 }
             })
             .collect()
@@ -215,18 +222,21 @@ impl Hub {
                     .unwrap_or_else(|| item.note.clone())
             }
             Action::SetModel(m) => format!("model {m}"),
+            Action::SetProvider(id) => {
+                let s = self.settings();
+                match crate::provider::Endpoint::by_id(id, &s) {
+                    Some(e) => format!(
+                        "{}\\nkind: {}\\nendpoint: {}\\nkey: {}\\n\\nenter: route the model here\\nctrl+w in this box: add a custom endpoint",
+                        e.label,
+                        e.kind_name(),
+                        e.base_url,
+                        e.key_state()
+                    ),
+                    None => item.note.clone(),
+                }
+            }
             Action::None => {
-                if self.current() == Section::Providers {
-                    let s = self.settings();
-                    format!(
-                        "current model: {}\nprovider: {}\nsandbox: {}\n\nset a model in .nana/settings.json:\n  {{\"model\": \"gpt-4o\", \"provider\": \"openai\"}}",
-                        s.model.clone().unwrap_or_else(|| format!("{} (default)", crate::provider::DEFAULT_MODEL)),
-                        s.provider
-                            .clone()
-                            .unwrap_or_else(|| "auto, from the model name".into()),
-                        if s.sandbox_enabled() { "on" } else { "off" },
-                    )
-                } else if self.current() == Section::Agents {
+                if self.current() == Section::Agents {
                     crate::company::describe(&self.root)
                 } else {
                     item.note.clone()

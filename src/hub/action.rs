@@ -15,4 +15,6 @@ pub enum Action {
     SetPersona(String),
     /// hand the skill to the agent
     RunSkill(String),
+    /// route the model to this endpoint from now on, by its id
+    SetProvider(String),
 }

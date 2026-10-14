@@ -117,7 +117,9 @@ the agent
     );
 }
 
-/// Prints the model in use and the provider it resolves to, then one row per provider with its key state, so the user sees what will answer.
+/// Prints the model in use, the endpoint it resolves to, then one row per
+/// endpoint with its key state, so the user sees what will answer. Custom
+/// endpoints come last, marked, the way the hub lists them.
 fn providers() {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let s = settings::Settings::load(&root);
@@ -125,37 +127,27 @@ fn providers() {
         .model
         .clone()
         .unwrap_or_else(|| format!("(none set — the default is {})", provider::DEFAULT_MODEL));
-    let picked = provider::detect(&model);
+    let picked = provider::Endpoint::resolve(&s, &model);
     println!("model:  {model}");
     println!("picked: {} [{}]", picked.label, picked.kind_name());
     println!();
-    println!("{:<20} {:<11} {:<48} key", "provider", "kind", "endpoint");
-    for p in provider::PROVIDERS {
-        let key = if p.keyless {
-            "not needed".to_string()
-        } else {
-            match p.key_env {
-                Some(env) => {
-                    let set = std::env::var(env).is_ok()
-                        || provider::dsh_has(env)
-                        || (p.id == "dashscope" && provider::dsh_has("OPP_API_KEY"));
-                    format!("{env}{}", if set { " (set)" } else { " (missing)" })
-                }
-                None => "-".to_string(),
-            }
-        };
+    println!("{:<20} {:<11} {:<48} key", "endpoint", "kind", "base url");
+    for e in provider::Endpoint::all(&s) {
+        let mark = if e.id == picked.id { "*" } else { " " };
         println!(
-            "{:<20} {:<11} {:<48} {}",
-            p.id,
-            p.kind_name(),
-            p.base_url,
-            key
+            "{mark}{:<19} {:<11} {:<48} {}",
+            e.id,
+            e.kind_name(),
+            e.base_url,
+            e.key_state()
         );
     }
     println!(
-        "\nmodels are routed by name: claude→anthropic, gemini→gemini, qwen/kimi/deepseek→dashscope,\n\
-         gpt→openai, llama→ollama, anything else→openai-compatible. override in settings.json:\n\
-         {{\"provider\":\"openai\",\"model\":\"gpt-4o\",\"base_url\":\"https://api.openai.com/v1\"}}"
+        "\n* is the endpoint answering now. models are routed by name: claude→anthropic,\n\
+         gemini→gemini, qwen/kimi/deepseek→dashscope, gpt→openai, llama→ollama,\n\
+         anything else→openai-compatible. add your own in .nana/settings.json:\n\
+         {{\"provider\":\"gw\",\"providers\":{{\"gw\":{{\"kind\":\"openai\",\n\
+         \"base_url\":\"https://gw.example/v1\",\"api_key_env\":\"GW_KEY\"}}}}}}"
     );
 }
 

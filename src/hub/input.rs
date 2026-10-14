@@ -102,6 +102,11 @@ impl Hub {
                 self.refresh();
                 Ok(Outcome::Say(msg))
             }
+            Purpose::NewProvider => {
+                let msg = super::apply::add_provider(&self.root, &value)?;
+                self.refresh();
+                Ok(Outcome::Say(msg))
+            }
             Purpose::Dream => {
                 self.dream();
                 Ok(Outcome::Say("dreaming over the latest sessions".into()))
