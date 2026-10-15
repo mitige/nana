@@ -8,6 +8,9 @@
   properly, and a test refuses any literal escape in it.
 - `refresh_detail` was split in two: `detail_of` builds the pane for one item,
   `refresh_detail` only chooses between it and the busy view.
+- the long-session test no longer pins the step count to an exact number: a
+  retry asks the same step again, so one lost answer on a loaded runner shifted
+  the count and failed the build. the assertions are floors now.
 
 ## 2.6.0
 
