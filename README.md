@@ -2,7 +2,7 @@
 
 an adaptive terminal editor. one buffer, every language.
 
-version 2.6.0
+version 2.6.1
 
 ![nana, the welcome screen](docs/shots/test1.png)
 
@@ -572,7 +572,7 @@ final_newline = true
 ## development
 
 ```sh
-cargo test        # 414 tests, no network, no fixtures to download
+cargo test        # 415 tests, no network, no fixtures to download
 cargo run         # the editor, on this repository
 cargo run -- --languages
 ```

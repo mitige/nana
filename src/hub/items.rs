@@ -185,11 +185,17 @@ impl Hub {
             self.detail = format!("({} is empty)", self.current().title());
             return;
         };
+        self.detail = self.detail_of(&item);
+    }
+
+    /// The detail pane for one selected item: what the action actually is,
+    /// so the pane shows real lines rather than raw placeholders. Falls back
+    /// to the item's own note when the action has nothing more to say.
+    fn detail_of(&self, item: &Item) -> String {
         if self.current() == Section::World {
-            self.detail = world::render(&self.root, self.selected().map(|i| &i.action));
-            return;
+            return world::render(&self.root, Some(&item.action));
         }
-        self.detail = match &item.action {
+        match &item.action {
             Action::ReadMemory(class, name) => {
                 let memory = Memory::open(&self.root);
                 let mut text = memory
@@ -226,7 +232,7 @@ impl Hub {
                 let s = self.settings();
                 match crate::provider::Endpoint::by_id(id, &s) {
                     Some(e) => format!(
-                        "{}\\nkind: {}\\nendpoint: {}\\nkey: {}\\n\\nenter: route the model here\\nctrl+w in this box: add a custom endpoint",
+                        "{}\nkind: {}\nendpoint: {}\nkey: {}\n\nenter: route the model here\nctrl+w in this box: add a custom endpoint",
                         e.label,
                         e.kind_name(),
                         e.base_url,
@@ -242,6 +248,6 @@ impl Hub {
                     item.note.clone()
                 }
             }
-        };
+        }
     }
 }

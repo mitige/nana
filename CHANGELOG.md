@@ -1,5 +1,14 @@
 # changelog
 
+## 2.6.1
+
+- fixed the providers pane printing escapes on screen: the detail of a provider
+  was built with a literal `\n` instead of a line break, so hovering a row showed
+  `\nkind: anthropic\nendpoint: ...` as one unreadable line. the pane now breaks
+  properly, and a test refuses any literal escape in it.
+- `refresh_detail` was split in two: `detail_of` builds the pane for one item,
+  `refresh_detail` only chooses between it and the busy view.
+
 ## 2.6.0
 
 - custom endpoints: `ctrl+w` in the providers box adds one of your own — `id url [key env] [kind]`, kind being openai, anthropic or gemini. it lands in `.nana/settings.json`, joins the built-in rows, and can be picked with enter like any other. a custom id that matches a built-in one shadows it. `nana --providers` lists them too, custom rows last.

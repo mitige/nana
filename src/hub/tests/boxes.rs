@@ -49,6 +49,22 @@ fn the_provider_box_marks_the_current_model() {
 }
 
 #[test]
+fn the_provider_detail_shows_real_lines_not_escapes() {
+    let d = seeded();
+    let mut hub = Hub::open(&d);
+    hub.next_section();
+    assert_eq!(hub.current(), Section::Providers);
+    let detail = hub.detail();
+    assert!(
+        !detail.contains("\\n"),
+        "literal escape in the pane: {detail}"
+    );
+    assert!(detail.contains("\nkind: anthropic"), "{detail}");
+    assert!(detail.contains("enter: route the model here"), "{detail}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
 fn the_skill_box_offers_to_run_it() {
     let d = seeded();
     let mut hub = Hub::open(&d);
